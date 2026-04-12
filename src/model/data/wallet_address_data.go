@@ -1,14 +1,23 @@
 package data
 
 import (
+	"strings"
+
 	"github.com/assimon/luuu/model/dao"
 	"github.com/assimon/luuu/model/mdb"
 	"github.com/assimon/luuu/util/constant"
 )
 
-// AddWalletAddress 创建钱包
+// AddWalletAddress 创建钱包 (默认 tron 网络，用于 Telegram 添加)
 func AddWalletAddress(address string) (*mdb.WalletAddress, error) {
-	exist, err := GetWalletAddressByToken(address)
+	return AddWalletAddressWithNetwork(mdb.NetworkTron, address)
+}
+
+// AddWalletAddressWithNetwork 创建指定网络的钱包地址
+func AddWalletAddressWithNetwork(network, address string) (*mdb.WalletAddress, error) {
+	network = strings.ToLower(strings.TrimSpace(network))
+	address = strings.TrimSpace(address)
+	exist, err := GetWalletAddressByNetworkAndAddress(network, address)
 	if err != nil {
 		return nil, err
 	}
@@ -16,6 +25,7 @@ func AddWalletAddress(address string) (*mdb.WalletAddress, error) {
 		return nil, constant.WalletAddressAlreadyExists
 	}
 	walletAddress := &mdb.WalletAddress{
+		Network: network,
 		Address: address,
 		Status:  mdb.TokenStatusEnable,
 	}
@@ -23,7 +33,17 @@ func AddWalletAddress(address string) (*mdb.WalletAddress, error) {
 	return walletAddress, err
 }
 
-// GetWalletAddressByToken 通过钱包地址获取address
+// GetWalletAddressByNetworkAndAddress 通过网络和地址查询
+func GetWalletAddressByNetworkAndAddress(network, address string) (*mdb.WalletAddress, error) {
+	walletAddress := new(mdb.WalletAddress)
+	err := dao.Mdb.Model(walletAddress).
+		Where("network = ?", network).
+		Where("address = ?", address).
+		Limit(1).Find(walletAddress).Error
+	return walletAddress, err
+}
+
+// GetWalletAddressByToken 通过钱包地址获取address (兼容旧接口)
 func GetWalletAddressByToken(address string) (*mdb.WalletAddress, error) {
 	walletAddress := new(mdb.WalletAddress)
 	err := dao.Mdb.Model(walletAddress).Limit(1).Find(walletAddress, "address = ?", address).Error
@@ -50,11 +70,28 @@ func GetAvailableWalletAddress() ([]mdb.WalletAddress, error) {
 	return WalletAddressList, err
 }
 
+// GetAvailableWalletAddressByNetwork 获得指定网络的所有可用钱包地址
+func GetAvailableWalletAddressByNetwork(network string) ([]mdb.WalletAddress, error) {
+	var list []mdb.WalletAddress
+	err := dao.Mdb.Model(list).
+		Where("status = ?", mdb.TokenStatusEnable).
+		Where("network = ?", network).
+		Find(&list).Error
+	return list, err
+}
+
 // GetAllWalletAddress 获得所有钱包地址
 func GetAllWalletAddress() ([]mdb.WalletAddress, error) {
 	var WalletAddressList []mdb.WalletAddress
 	err := dao.Mdb.Model(WalletAddressList).Find(&WalletAddressList).Error
 	return WalletAddressList, err
+}
+
+// GetAllWalletAddressByNetwork 获得指定网络的所有钱包地址
+func GetAllWalletAddressByNetwork(network string) ([]mdb.WalletAddress, error) {
+	var list []mdb.WalletAddress
+	err := dao.Mdb.Model(list).Where("network = ?", network).Find(&list).Error
+	return list, err
 }
 
 // ChangeWalletAddressStatus 启用禁用钱包

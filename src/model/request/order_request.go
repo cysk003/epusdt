@@ -12,6 +12,8 @@ type CreateTransactionRequest struct {
 	NotifyUrl   string  `json:"notify_url" validate:"required"`
 	Signature   string  `json:"signature"  validate:"required"`
 	RedirectUrl string  `json:"redirect_url"`
+	Name        string  `json:"name"`
+	PaymentType string  `json:"payment_type"`
 }
 
 func (r CreateTransactionRequest) Translates() map[string]string {
@@ -35,4 +37,19 @@ type OrderProcessingRequest struct {
 	Amount             float64
 	TradeId            string
 	BlockTransactionId string
+}
+
+// SwitchNetworkRequest 切换支付网络
+type SwitchNetworkRequest struct {
+	TradeId string `json:"trade_id" validate:"required"`
+	Token   string `json:"token" validate:"required"`
+	Network string `json:"network" validate:"required"`
+}
+
+func (r SwitchNetworkRequest) Translates() map[string]string {
+	return validate.MS{
+		"TradeId": "订单号",
+		"Token":   "币种",
+		"Network": "网络",
+	}
 }

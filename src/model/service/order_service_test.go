@@ -18,6 +18,7 @@ func newCreateTransactionRequest(orderID string, amount float64) *request.Create
 		OrderId:   orderID,
 		Currency:  "CNY",
 		Token:     "USDT",
+		Network:   "tron",
 		Amount:    amount,
 		NotifyUrl: "https://merchant.example/callback",
 	}
@@ -53,7 +54,7 @@ func TestCreateTransactionAssignsIncrementedAmountsAndLocks(t *testing.T) {
 		t.Fatalf("unexpected tokens: %s, %s", resp1.Token, resp2.Token)
 	}
 
-	tradeID1, err := data.GetTradeIdByWalletAddressAndAmountAndToken(resp1.ReceiveAddress, resp1.Token, resp1.ActualAmount)
+	tradeID1, err := data.GetTradeIdByWalletAddressAndAmountAndToken("tron", resp1.ReceiveAddress, resp1.Token, resp1.ActualAmount)
 	if err != nil {
 		t.Fatalf("get first runtime lock: %v", err)
 	}
@@ -61,7 +62,7 @@ func TestCreateTransactionAssignsIncrementedAmountsAndLocks(t *testing.T) {
 		t.Fatalf("first runtime lock = %s, want %s", tradeID1, resp1.TradeId)
 	}
 
-	tradeID2, err := data.GetTradeIdByWalletAddressAndAmountAndToken(resp2.ReceiveAddress, resp2.Token, resp2.ActualAmount)
+	tradeID2, err := data.GetTradeIdByWalletAddressAndAmountAndToken("tron", resp2.ReceiveAddress, resp2.Token, resp2.ActualAmount)
 	if err != nil {
 		t.Fatalf("get second runtime lock: %v", err)
 	}
@@ -86,6 +87,7 @@ func TestOrderProcessingMarksPaidAndReleasesLock(t *testing.T) {
 	err = OrderProcessing(&request.OrderProcessingRequest{
 		ReceiveAddress:     resp.ReceiveAddress,
 		Token:              resp.Token,
+		Network:            "tron",
 		TradeId:            resp.TradeId,
 		Amount:             resp.ActualAmount,
 		BlockTransactionId: "block_1",
@@ -108,7 +110,7 @@ func TestOrderProcessingMarksPaidAndReleasesLock(t *testing.T) {
 		t.Fatalf("block transaction id = %s, want block_1", order.BlockTransactionId)
 	}
 
-	tradeID, err := data.GetTradeIdByWalletAddressAndAmountAndToken(resp.ReceiveAddress, resp.Token, resp.ActualAmount)
+	tradeID, err := data.GetTradeIdByWalletAddressAndAmountAndToken("tron", resp.ReceiveAddress, resp.Token, resp.ActualAmount)
 	if err != nil {
 		t.Fatalf("get runtime lock after processing: %v", err)
 	}
@@ -133,6 +135,7 @@ func TestOrderProcessingRejectsDuplicateBlockForSameOrder(t *testing.T) {
 	req := &request.OrderProcessingRequest{
 		ReceiveAddress:     resp.ReceiveAddress,
 		Token:              resp.Token,
+		Network:            "tron",
 		TradeId:            resp.TradeId,
 		Amount:             resp.ActualAmount,
 		BlockTransactionId: "block_1",
@@ -180,6 +183,7 @@ func TestOrderProcessingDoesNotReviveExpiredOrder(t *testing.T) {
 	err = OrderProcessing(&request.OrderProcessingRequest{
 		ReceiveAddress:     resp.ReceiveAddress,
 		Token:              resp.Token,
+		Network:            "tron",
 		TradeId:            resp.TradeId,
 		Amount:             resp.ActualAmount,
 		BlockTransactionId: "block_expired",
@@ -239,6 +243,7 @@ func TestOrderProcessingOnlyOneOrderClaimsABlockTransaction(t *testing.T) {
 			errs <- OrderProcessing(&request.OrderProcessingRequest{
 				ReceiveAddress:     address,
 				Token:              token,
+				Network:            "tron",
 				TradeId:            tradeID,
 				Amount:             amount,
 				BlockTransactionId: "shared_block",

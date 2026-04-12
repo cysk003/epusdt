@@ -28,8 +28,10 @@ const (
 	IncrementalMaximumNumber = 100
 )
 
-var gCreateTransactionLock sync.Mutex
-var gOrderProcessingLock sync.Mutex
+var (
+	gCreateTransactionLock sync.Mutex
+	gOrderProcessingLock   sync.Mutex
+)
 
 // CreateTransaction creates a new payment order.
 func CreateTransaction(req *request.CreateTransactionRequest) (*response.CreateTransactionResponse, error) {
@@ -38,6 +40,7 @@ func CreateTransaction(req *request.CreateTransactionRequest) (*response.CreateT
 
 	token := strings.ToUpper(strings.TrimSpace(req.Token))
 	currency := strings.ToUpper(strings.TrimSpace(req.Currency))
+	network := strings.ToLower(strings.TrimSpace(req.Network))
 	payAmount := math.MustParsePrecFloat64(req.Amount, 2)
 	rate := config.GetRateForCoin(strings.ToLower(token), strings.ToLower(currency))
 	if rate <= 0 {
@@ -61,7 +64,7 @@ func CreateTransaction(req *request.CreateTransactionRequest) (*response.CreateT
 		return nil, constant.OrderAlreadyExists
 	}
 
-	walletAddress, err := data.GetAvailableWalletAddress()
+	walletAddress, err := data.GetAvailableWalletAddressByNetwork(network)
 	if err != nil {
 		return nil, err
 	}
@@ -71,7 +74,7 @@ func CreateTransaction(req *request.CreateTransactionRequest) (*response.CreateT
 
 	tradeID := GenerateCode()
 	amount := math.MustParsePrecFloat64(decimalTokenAmount.InexactFloat64(), 2)
-	availableAddress, availableAmount, err := ReserveAvailableWalletAndAmount(tradeID, token, amount, walletAddress)
+	availableAddress, availableAmount, err := ReserveAvailableWalletAndAmount(tradeID, network, token, amount, walletAddress)
 	if err != nil {
 		return nil, err
 	}
@@ -88,9 +91,12 @@ func CreateTransaction(req *request.CreateTransactionRequest) (*response.CreateT
 		ActualAmount:   availableAmount,
 		ReceiveAddress: availableAddress,
 		Token:          token,
+		Network:        network,
 		Status:         mdb.StatusWaitPay,
 		NotifyUrl:      req.NotifyUrl,
 		RedirectUrl:    req.RedirectUrl,
+		Name:           req.Name,
+		PaymentType:    req.PaymentType,
 	}
 	if err = data.CreateOrderWithTransaction(tx, order); err != nil {
 		tx.Rollback()
@@ -148,20 +154,83 @@ func OrderProcessing(req *request.OrderProcessingRequest) error {
 		return err
 	}
 
-	if err = data.UnLockTransaction(req.ReceiveAddress, req.Token, req.Amount); err != nil {
+	if err = data.UnLockTransaction(req.Network, req.ReceiveAddress, req.Token, req.Amount); err != nil {
 		log.Sugar.Warnf("[order] unlock transaction after pay success failed, trade_id=%s, err=%v", req.TradeId, err)
 	}
+
+	// Load order to check parent-child relationship
+	order, err := data.GetOrderInfoByTradeId(req.TradeId)
+	if err != nil {
+		return nil
+	}
+
+	// Parent order paid directly: expire all sub-orders and release their locks
+	if order.ParentTradeId == "" {
+		subs, subErr := data.GetActiveSubOrders(order.TradeId)
+		if subErr != nil {
+			log.Sugar.Errorf("[order] get sub-orders for parent failed, trade_id=%s, err=%v", order.TradeId, subErr)
+			return nil
+		}
+		for _, sub := range subs {
+			if err = data.ExpireOrderByTradeId(sub.TradeId); err != nil {
+				log.Sugar.Warnf("[order] expire sub-order failed, trade_id=%s, err=%v", sub.TradeId, err)
+			}
+			if err = data.UnLockTransaction(sub.Network, sub.ReceiveAddress, sub.Token, sub.ActualAmount); err != nil {
+				log.Sugar.Warnf("[order] unlock sub-order transaction failed, trade_id=%s, err=%v", sub.TradeId, err)
+			}
+		}
+		return nil
+	}
+
+	// Sub-order should not trigger its own callback (notify_url is empty).
+	// OrderSuccessWithTransaction unconditionally sets callback_confirm=No,
+	// reset it here to prevent the callback worker from retrying an empty URL.
+	if err = data.ResetCallbackConfirmOk(order.TradeId); err != nil {
+		log.Sugar.Warnf("[order] reset sub-order callback_confirm failed, trade_id=%s, err=%v", order.TradeId, err)
+	}
+
+	parent, err := data.GetOrderInfoByTradeId(order.ParentTradeId)
+	if err != nil {
+		log.Sugar.Errorf("[order] load parent order failed, parent_trade_id=%s, err=%v", order.ParentTradeId, err)
+		return nil
+	}
+
+	// Mark parent as paid with sub-order's payment details
+	if _, err = data.MarkParentOrderSuccess(parent.TradeId, order); err != nil {
+		log.Sugar.Errorf("[order] mark parent success failed, parent_trade_id=%s, err=%v", parent.TradeId, err)
+	}
+
+	// Release parent's own wallet lock
+	if err = data.UnLockTransaction(parent.Network, parent.ReceiveAddress, parent.Token, parent.ActualAmount); err != nil {
+		log.Sugar.Warnf("[order] unlock parent transaction failed, parent_trade_id=%s, err=%v", parent.TradeId, err)
+	}
+
+	// Expire sibling sub-orders and release their locks
+	siblings, err := data.GetSiblingSubOrders(parent.TradeId, order.TradeId)
+	if err != nil {
+		log.Sugar.Errorf("[order] get sibling sub-orders failed, parent_trade_id=%s, err=%v", parent.TradeId, err)
+		return nil
+	}
+	for _, sib := range siblings {
+		if err = data.ExpireOrderByTradeId(sib.TradeId); err != nil {
+			log.Sugar.Warnf("[order] expire sibling failed, trade_id=%s, err=%v", sib.TradeId, err)
+		}
+		if err = data.UnLockTransaction(sib.Network, sib.ReceiveAddress, sib.Token, sib.ActualAmount); err != nil {
+			log.Sugar.Warnf("[order] unlock sibling transaction failed, trade_id=%s, err=%v", sib.TradeId, err)
+		}
+	}
+
 	return nil
 }
 
-// ReserveAvailableWalletAndAmount finds and locks an address+token+amount pair.
-func ReserveAvailableWalletAndAmount(tradeID string, token string, amount float64, walletAddress []mdb.WalletAddress) (string, float64, error) {
+// ReserveAvailableWalletAndAmount finds and locks a network+address+token+amount pair.
+func ReserveAvailableWalletAndAmount(tradeID string, network string, token string, amount float64, walletAddress []mdb.WalletAddress) (string, float64, error) {
 	availableAddress := ""
 	availableAmount := amount
 
 	tryLockWalletFunc := func(targetAmount float64) (string, error) {
 		for _, address := range walletAddress {
-			err := data.LockTransaction(address.Address, token, tradeID, targetAmount, config.GetOrderExpirationTimeDuration())
+			err := data.LockTransaction(network, address.Address, token, tradeID, targetAmount, config.GetOrderExpirationTimeDuration())
 			if err == nil {
 				return address.Address, nil
 			}
@@ -207,4 +276,142 @@ func GetOrderInfoByTradeId(tradeId string) (*mdb.Orders, error) {
 		return nil, constant.OrderNotExists
 	}
 	return order, nil
+}
+
+const MaxSubOrders = 2
+
+// SwitchNetwork creates or returns an existing sub-order for a different token+network.
+func SwitchNetwork(req *request.SwitchNetworkRequest) (*response.CheckoutCounterResponse, error) {
+	gCreateTransactionLock.Lock()
+	defer gCreateTransactionLock.Unlock()
+
+	token := strings.ToUpper(strings.TrimSpace(req.Token))
+	network := strings.ToLower(strings.TrimSpace(req.Network))
+
+	// 1. Load parent order
+	parent, err := data.GetOrderInfoByTradeId(req.TradeId)
+	if err != nil {
+		return nil, err
+	}
+	if parent.ID <= 0 {
+		return nil, constant.OrderNotExists
+	}
+	if parent.ParentTradeId != "" {
+		return nil, constant.CannotSwitchSubOrder
+	}
+	if parent.Status != mdb.StatusWaitPay {
+		return nil, constant.OrderNotWaitPay
+	}
+
+	// 2. Same token+network as parent → mark selected and return
+	if strings.EqualFold(parent.Token, token) && strings.EqualFold(parent.Network, network) {
+		_ = data.MarkOrderSelected(parent.TradeId)
+		parent.IsSelected = true
+		return buildCheckoutResponse(parent), nil
+	}
+
+	// 3. Existing active sub-order for this token+network → return it
+	existing, err := data.GetSubOrderByTokenNetwork(parent.TradeId, token, network)
+	if err != nil {
+		return nil, err
+	}
+	if existing.ID > 0 {
+		_ = data.MarkOrderSelected(parent.TradeId)
+		_ = data.MarkOrderSelected(existing.TradeId)
+		_ = data.RefreshOrderExpiration(parent.TradeId)
+		existing.IsSelected = true
+		return buildCheckoutResponse(existing), nil
+	}
+
+	// 4. Check sub-order limit
+	count, err := data.CountActiveSubOrders(parent.TradeId)
+	if err != nil {
+		return nil, err
+	}
+	if count >= MaxSubOrders {
+		return nil, constant.SubOrderLimitExceeded
+	}
+
+	// 5. Calculate amount for the new network
+	rate := config.GetRateForCoin(strings.ToLower(token), strings.ToLower(parent.Currency))
+	if rate <= 0 {
+		return nil, constant.RateAmountErr
+	}
+	decimalPayAmount := decimal.NewFromFloat(parent.Amount)
+	decimalTokenAmount := decimalPayAmount.Mul(decimal.NewFromFloat(rate))
+	if decimalTokenAmount.Cmp(decimal.NewFromFloat(UsdtMinimumPaymentAmount)) == -1 {
+		return nil, constant.PayAmountErr
+	}
+
+	// 6. Find and lock wallet
+	walletAddress, err := data.GetAvailableWalletAddressByNetwork(network)
+	if err != nil {
+		return nil, err
+	}
+	if len(walletAddress) <= 0 {
+		return nil, constant.NotAvailableWalletAddress
+	}
+
+	subTradeID := GenerateCode()
+	amount := math.MustParsePrecFloat64(decimalTokenAmount.InexactFloat64(), 2)
+	availableAddress, availableAmount, err := ReserveAvailableWalletAndAmount(subTradeID, network, token, amount, walletAddress)
+	if err != nil {
+		return nil, err
+	}
+	if availableAddress == "" {
+		return nil, constant.NotAvailableAmountErr
+	}
+
+	// 7. Create sub-order
+	tx := dao.Mdb.Begin()
+	subOrder := &mdb.Orders{
+		TradeId:         subTradeID,
+		OrderId:         subTradeID, // sub-order uses its own trade_id as order_id (unique constraint)
+		ParentTradeId:   parent.TradeId,
+		Amount:          parent.Amount,
+		Currency:        parent.Currency,
+		ActualAmount:    availableAmount,
+		ReceiveAddress:  availableAddress,
+		Token:           token,
+		Network:         network,
+		Status:          mdb.StatusWaitPay,
+		IsSelected:      true,
+		NotifyUrl:       "",
+		RedirectUrl:     parent.RedirectUrl,
+		Name:            parent.Name,
+		CallBackConfirm: mdb.CallBackConfirmOk, // don't trigger callback on sub-order
+		PaymentType:     parent.PaymentType,
+	}
+	if err = data.CreateOrderWithTransaction(tx, subOrder); err != nil {
+		tx.Rollback()
+		_ = data.UnLockTransactionByTradeId(subTradeID)
+		return nil, err
+	}
+	if err = tx.Commit().Error; err != nil {
+		tx.Rollback()
+		_ = data.UnLockTransactionByTradeId(subTradeID)
+		return nil, err
+	}
+
+	// Mark parent as selected and refresh its expiration to match the sub-order
+	_ = data.MarkOrderSelected(parent.TradeId)
+	_ = data.RefreshOrderExpiration(parent.TradeId)
+
+	return buildCheckoutResponse(subOrder), nil
+}
+
+func buildCheckoutResponse(order *mdb.Orders) *response.CheckoutCounterResponse {
+	return &response.CheckoutCounterResponse{
+		TradeId:        order.TradeId,
+		Amount:         order.Amount,
+		ActualAmount:   order.ActualAmount,
+		Token:          order.Token,
+		Currency:       order.Currency,
+		ReceiveAddress: order.ReceiveAddress,
+		Network:        order.Network,
+		ExpirationTime: order.CreatedAt.AddMinutes(config.GetOrderExpirationTime()).TimestampMilli(),
+		RedirectUrl:    order.RedirectUrl,
+		CreatedAt:      order.CreatedAt.TimestampMilli(),
+		IsSelected:     order.IsSelected,
+	}
 }

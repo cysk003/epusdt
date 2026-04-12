@@ -27,6 +27,7 @@ func TestProcessExpiredOrdersExpiresWaitingOrdersAndReleasesLocks(t *testing.T) 
 		ActualAmount:   1,
 		ReceiveAddress: "wallet_1",
 		Token:          "USDT",
+		Network:        "tron",
 		Status:         mdb.StatusWaitPay,
 		NotifyUrl:      "https://merchant.example/callback",
 	}
@@ -36,7 +37,7 @@ func TestProcessExpiredOrdersExpiresWaitingOrdersAndReleasesLocks(t *testing.T) 
 	if err := dao.Mdb.Model(order).UpdateColumn("created_at", time.Now().Add(-20*time.Minute)).Error; err != nil {
 		t.Fatalf("age expired order: %v", err)
 	}
-	if err := data.LockTransaction(order.ReceiveAddress, order.Token, order.TradeId, order.ActualAmount, time.Hour); err != nil {
+	if err := data.LockTransaction("tron", order.ReceiveAddress, order.Token, order.TradeId, order.ActualAmount, time.Hour); err != nil {
 		t.Fatalf("lock expired order: %v", err)
 	}
 
@@ -48,13 +49,14 @@ func TestProcessExpiredOrdersExpiresWaitingOrdersAndReleasesLocks(t *testing.T) 
 		ActualAmount:   1.01,
 		ReceiveAddress: "wallet_1",
 		Token:          "USDT",
+		Network:        "tron",
 		Status:         mdb.StatusWaitPay,
 		NotifyUrl:      "https://merchant.example/callback",
 	}
 	if err := dao.Mdb.Create(recentOrder).Error; err != nil {
 		t.Fatalf("create recent order: %v", err)
 	}
-	if err := data.LockTransaction(recentOrder.ReceiveAddress, recentOrder.Token, recentOrder.TradeId, recentOrder.ActualAmount, time.Hour); err != nil {
+	if err := data.LockTransaction("tron", recentOrder.ReceiveAddress, recentOrder.Token, recentOrder.TradeId, recentOrder.ActualAmount, time.Hour); err != nil {
 		t.Fatalf("lock recent order: %v", err)
 	}
 
@@ -67,7 +69,7 @@ func TestProcessExpiredOrdersExpiresWaitingOrdersAndReleasesLocks(t *testing.T) 
 	if expired.Status != mdb.StatusExpired {
 		t.Fatalf("expired order status = %d, want %d", expired.Status, mdb.StatusExpired)
 	}
-	lockTradeID, err := data.GetTradeIdByWalletAddressAndAmountAndToken(order.ReceiveAddress, order.Token, order.ActualAmount)
+	lockTradeID, err := data.GetTradeIdByWalletAddressAndAmountAndToken("tron", order.ReceiveAddress, order.Token, order.ActualAmount)
 	if err != nil {
 		t.Fatalf("expired order lock lookup: %v", err)
 	}
@@ -82,7 +84,7 @@ func TestProcessExpiredOrdersExpiresWaitingOrdersAndReleasesLocks(t *testing.T) 
 	if recent.Status != mdb.StatusWaitPay {
 		t.Fatalf("recent order status = %d, want %d", recent.Status, mdb.StatusWaitPay)
 	}
-	lockTradeID, err = data.GetTradeIdByWalletAddressAndAmountAndToken(recentOrder.ReceiveAddress, recentOrder.Token, recentOrder.ActualAmount)
+	lockTradeID, err = data.GetTradeIdByWalletAddressAndAmountAndToken("tron", recentOrder.ReceiveAddress, recentOrder.Token, recentOrder.ActualAmount)
 	if err != nil {
 		t.Fatalf("recent order lock lookup: %v", err)
 	}

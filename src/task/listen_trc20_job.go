@@ -4,12 +4,12 @@ import (
 	"sync"
 
 	"github.com/assimon/luuu/model/data"
+	"github.com/assimon/luuu/model/mdb"
 	"github.com/assimon/luuu/model/service"
 	"github.com/assimon/luuu/util/log"
 )
 
-type ListenTrc20Job struct {
-}
+type ListenTrc20Job struct{}
 
 var gListenTrc20JobLock sync.Mutex
 
@@ -17,7 +17,7 @@ func (r ListenTrc20Job) Run() {
 	gListenTrc20JobLock.Lock()
 	defer gListenTrc20JobLock.Unlock()
 	log.Sugar.Debug("[ListenTrc20Job] Job triggered")
-	walletAddress, err := data.GetAvailableWalletAddress()
+	walletAddress, err := data.GetAvailableWalletAddressByNetwork(mdb.NetworkTron)
 	if err != nil {
 		log.Sugar.Errorf("[ListenTrc20Job] Failed to get wallet addresses: %v", err)
 		return
