@@ -18,8 +18,6 @@ import (
 	"github.com/ethereum/go-ethereum/ethclient"
 )
 
-const polygonDefaultWsURL = "wss://polygon-bor-rpc.publicnode.com"
-
 type polygonRecipientSnapshot struct {
 	addrs map[string]struct{}
 }
@@ -67,7 +65,10 @@ func runPolygonListener(contracts []common.Address) {
 		}
 	}()
 
-	wsURL := resolveChainWsURL(mdb.NetworkPolygon, polygonDefaultWsURL)
+	wsURL, ok := resolveChainWsURL(mdb.NetworkPolygon, "[POLYGON-WS]")
+	if !ok {
+		return
+	}
 	log.Sugar.Infof("[POLYGON-WS] connecting to %s watching %d contract(s)", wsURL, len(contracts))
 
 	query := ethereum.FilterQuery{

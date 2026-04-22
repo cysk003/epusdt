@@ -18,8 +18,6 @@ import (
 	"github.com/ethereum/go-ethereum/ethclient"
 )
 
-const bscDefaultWsURL = "wss://bsc.drpc.org"
-
 type bscRecipientSnapshot struct {
 	addrs map[string]struct{}
 }
@@ -68,7 +66,10 @@ func runBscListener(contracts []common.Address) {
 		}
 	}()
 
-	wsURL := resolveChainWsURL(mdb.NetworkBsc, bscDefaultWsURL)
+	wsURL, ok := resolveChainWsURL(mdb.NetworkBsc, "[BSC-WS]")
+	if !ok {
+		return
+	}
 	log.Sugar.Infof("[BSC-WS] connecting to %s watching %d contract(s)", wsURL, len(contracts))
 
 	query := ethereum.FilterQuery{

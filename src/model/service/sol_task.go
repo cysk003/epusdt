@@ -281,6 +281,21 @@ type solSignatureResult struct {
 	BlockTime *int64      `json:"blockTime"`
 }
 
+func resolveSolanaRpcURL() (string, error) {
+	node, err := data.SelectRpcNode(mdb.NetworkSolana, mdb.RpcNodeTypeHttp)
+	if err != nil {
+		return "", err
+	}
+	if node == nil || node.ID == 0 {
+		return "", fmt.Errorf("no enabled %s %s RPC node configured in rpc_nodes", mdb.NetworkSolana, mdb.RpcNodeTypeHttp)
+	}
+	rpcURL := strings.TrimSpace(node.Url)
+	if rpcURL == "" {
+		return "", fmt.Errorf("rpc_nodes id=%d has empty url", node.ID)
+	}
+	return rpcURL, nil
+}
+
 // SolRetryClient 发送 Solana JSON-RPC 请求，自动重试
 func SolRetryClient(method string, params []interface{}) ([]byte, error) {
 	client := resty.New()
@@ -297,7 +312,10 @@ func SolRetryClient(method string, params []interface{}) ([]byte, error) {
 		return false
 	})
 
-	rpcUrl := config.GetSolanaRpcUrl()
+	rpcUrl, err := resolveSolanaRpcURL()
+	if err != nil {
+		return nil, err
+	}
 
 	resp, err := client.R().
 		SetHeader("Content-Type", "application/json").

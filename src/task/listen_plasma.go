@@ -18,8 +18,6 @@ import (
 	"github.com/ethereum/go-ethereum/ethclient"
 )
 
-const plasmaDefaultWsURL = "wss://rpc.plasma.to"
-
 type plasmaRecipientSnapshot struct {
 	addrs map[string]struct{}
 }
@@ -67,7 +65,10 @@ func runPlasmaListener(contracts []common.Address) {
 		}
 	}()
 
-	wsURL := resolveChainWsURL(mdb.NetworkPlasma, plasmaDefaultWsURL)
+	wsURL, ok := resolveChainWsURL(mdb.NetworkPlasma, "[PLASMA-WS]")
+	if !ok {
+		return
+	}
 	log.Sugar.Infof("[PLASMA-WS] connecting to %s watching %d contract(s)", wsURL, len(contracts))
 
 	query := ethereum.FilterQuery{
