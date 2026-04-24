@@ -34,8 +34,6 @@ var (
 	TgBotToken         string
 	TgProxy            string
 	TgManage           int64
-	UsdtRate           float64
-	RateApiUrl         string
 	BuildVersion       = "0.0.0-dev"
 	BuildCommit        = "none"
 	BuildDate          = "unknown"
@@ -76,8 +74,6 @@ func Init() {
 	TgBotToken = viper.GetString("tg_bot_token")
 	TgProxy = viper.GetString("tg_proxy")
 	TgManage = viper.GetInt64("tg_manage")
-
-	RateApiUrl = GetRateApiUrl()
 }
 
 func mustMkdir(path string) {
@@ -275,13 +271,14 @@ func GetRateForCoin(coin string, base string) float64 {
 			if usdtRate > 0 {
 				return 1 / usdtRate
 			}
+			return 0
 		}
 	}
+	return getRateForCoinFromAPI(coin, base)
+}
 
-	baseURL := RateApiUrl
-	if baseURL == "" {
-		baseURL = GetRateApiUrl()
-	}
+func getRateForCoinFromAPI(coin string, base string) float64 {
+	baseURL := GetRateApiUrl()
 	if baseURL == "" {
 		log.Printf("rate api url is empty")
 		return 0.0
@@ -313,19 +310,18 @@ func GetRateForCoin(coin string, base string) float64 {
 }
 
 func GetUsdtRate() float64 {
-	// Prefer the DB-backed override (admin-configurable). Fall back to
-	// the legacy .env var, then the hardcoded 6.4 default.
+	// Only the admin setting can force the USDT/CNY rate. When the
+	// setting is unset, zero, or negative, fall back to the rate API.
 	if forced := settingsForcedUsdtRate(); forced > 0 {
 		return forced
 	}
-	forcedUsdtRate := viper.GetFloat64("forced_usdt_rate")
-	if forcedUsdtRate > 0 {
-		return forcedUsdtRate
+
+	apiRate := getRateForCoinFromAPI("usdt", "cny")
+	if apiRate > 0 {
+		return 1 / apiRate
 	}
-	if UsdtRate <= 0 {
-		return 6.4
-	}
-	return UsdtRate
+	log.Printf("usdt/cny rate unavailable: rate.forced_usdt_rate <= 0 and rate api returned no data")
+	return 0
 }
 
 func GetOrderExpirationTime() int {
