@@ -1,0 +1,1 @@
+import{Zd as e,ef as t}from"./messages-Dl4DZ3oF.js";import{t as n}from"./useRouter-BFyZZPZT.js";var r=t(e(),1);function i(e){let t=n();return r.useCallback(n=>t.navigate({...n,from:n.from??e?.from}),[e?.from,t])}export{i as t};

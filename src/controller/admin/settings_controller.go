@@ -24,6 +24,16 @@ import (
 //     epay.default_currency  (string) — fiat currency for EPAY orders, e.g. "cny" (default)
 //     epay.default_network   (string) — blockchain network for EPAY orders, e.g. "tron" (default)
 //
+//   - group=okpay:
+//     okpay.enabled          (bool)   — enable OkPay as a switch-network payment option
+//     okpay.shop_id          (string) — OkPay merchant/shop identifier
+//     okpay.shop_token       (string) — OkPay signing token
+//     okpay.api_url          (string) — OkPay API base URL
+//     okpay.callback_url     (string) — server callback URL used for OkPay notify
+//     okpay.return_url       (string) — optional default browser return URL after payment
+//     okpay.timeout_seconds  (int)    — outbound OkPay API timeout in seconds
+//     okpay.allow_tokens     (string) — comma-separated allowed tokens, e.g. "USDT,TRX"
+//
 //   - group=brand:
 //     brand.site_name        (string) — site display name
 //     brand.logo_url         (string) — logo image URL
@@ -34,7 +44,7 @@ import (
 //   - group=system:
 //     system.order_expiration_time (int) — order expiry in minutes
 type SettingUpsertItem struct {
-	Group string `json:"group" enums:"brand,rate,system,epay" example:"epay"`
+	Group string `json:"group" enums:"brand,rate,system,epay,okpay" example:"epay"`
 	Key   string `json:"key" example:"epay.default_network"`
 	Value string `json:"value" example:"tron"`
 	Type  string `json:"type" enums:"string,int,bool,json" example:"string"`
@@ -48,12 +58,12 @@ type SettingsUpsertRequest struct {
 // ListSettings returns all rows, optionally filtered by group.
 // @Summary      List settings
 // @Description  Returns all settings, optionally filtered by group.
-// @Description  Available groups: brand, rate, system, epay.
+// @Description  Available groups: brand, rate, system, epay, okpay.
 // @Description  See SettingUpsertItem for the full list of supported keys per group.
 // @Tags         Admin Settings
 // @Security     AdminJWT
 // @Produce      json
-// @Param        group query string false "Group filter (brand|rate|system|epay)"
+// @Param        group query string false "Group filter (brand|rate|system|epay|okpay)"
 // @Success      200 {object} response.ApiResponse{data=[]mdb.Setting}
 // @Failure      400 {object} response.ApiResponse
 // @Router       /admin/api/v1/settings [get]
@@ -71,8 +81,9 @@ func (c *BaseAdminController) ListSettings(ctx echo.Context) error {
 // ones. Errors are returned per-key so the UI can surface them.
 // @Summary      Upsert settings
 // @Description  Batch insert/update settings. Returns per-key status.
-// @Description  Supported groups: brand, rate, system, epay.
+// @Description  Supported groups: brand, rate, system, epay, okpay.
 // @Description  epay group keys: epay.default_token (e.g. "usdt"), epay.default_currency (e.g. "cny"), epay.default_network (e.g. "tron").
+// @Description  okpay group keys: okpay.enabled, okpay.shop_id, okpay.shop_token, okpay.api_url, okpay.callback_url, okpay.return_url, okpay.timeout_seconds, okpay.allow_tokens.
 // @Description  rate group keys: rate.forced_usdt_rate (>0 overrides USDT/CNY; <=0 uses rate.api_url), rate.api_url, rate.adjust_percent, rate.okx_c2c_enabled.
 // @Description  brand group keys: brand.site_name, brand.logo_url, brand.page_title, brand.pay_success_text, brand.support_url.
 // @Description  system group keys: system.order_expiration_time.

@@ -1,0 +1,1 @@
+import{t as e}from"./general-error-DAfi35Qo.js";var t=e;export{t as component};

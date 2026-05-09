@@ -682,10 +682,31 @@ func TestAdminDashboard_AllRoutes(t *testing.T) {
 func TestAdminSettings_ListAndUpsert(t *testing.T) {
 	e, token := setupAdminTestEnv(t)
 
+	if err := data.SetSetting(mdb.SettingGroupOkPay, mdb.SettingKeyOkPayShopToken, "token-visible-in-settings", mdb.SettingTypeString); err != nil {
+		t.Fatalf("seed okpay.shop_token: %v", err)
+	}
+
 	// List settings.
 	rec := doGetAdmin(e, "/admin/api/v1/settings", token)
 	t.Logf("ListSettings: %s", rec.Body.String())
-	assertOK(t, rec)
+	resp := assertOK(t, rec)
+	rows, ok := resp["data"].([]interface{})
+	if !ok {
+		t.Fatalf("expected settings array, got %T", resp["data"])
+	}
+	foundToken := false
+	for _, row := range rows {
+		item, _ := row.(map[string]interface{})
+		if item["key"] == mdb.SettingKeyOkPayShopToken {
+			foundToken = true
+			if item["value"] != "token-visible-in-settings" {
+				t.Fatalf("okpay.shop_token value = %v, want token-visible-in-settings", item["value"])
+			}
+		}
+	}
+	if !foundToken {
+		t.Fatalf("expected admin settings list to expose %s", mdb.SettingKeyOkPayShopToken)
+	}
 
 	// Upsert a setting.
 	rec = doPutAdmin(e, "/admin/api/v1/settings", map[string]interface{}{
@@ -705,6 +726,39 @@ func TestAdminSettings_DeleteNonExistent(t *testing.T) {
 	// Should not be a server error.
 	if rec.Code >= 500 {
 		t.Fatalf("unexpected server error: %d %s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestAdminConfig_ExposesOkPayCredentials(t *testing.T) {
+	e, token := setupAdminTestEnv(t)
+	if err := data.SetSetting(mdb.SettingGroupOkPay, mdb.SettingKeyOkPayEnabled, "true", mdb.SettingTypeBool); err != nil {
+		t.Fatalf("seed okpay.enabled: %v", err)
+	}
+	if err := data.SetSetting(mdb.SettingGroupOkPay, mdb.SettingKeyOkPayShopID, "shop-admin-1", mdb.SettingTypeString); err != nil {
+		t.Fatalf("seed okpay.shop_id: %v", err)
+	}
+	if err := data.SetSetting(mdb.SettingGroupOkPay, mdb.SettingKeyOkPayShopToken, "token-admin-1", mdb.SettingTypeString); err != nil {
+		t.Fatalf("seed okpay.shop_token: %v", err)
+	}
+	if err := data.SetSetting(mdb.SettingGroupOkPay, mdb.SettingKeyOkPayCallbackURL, "https://example.com/notify", mdb.SettingTypeString); err != nil {
+		t.Fatalf("seed okpay.callback_url: %v", err)
+	}
+
+	rec := doGetAdmin(e, "/admin/api/v1/config", token)
+	resp := assertOK(t, rec)
+	dataObj, _ := resp["data"].(map[string]interface{})
+	okpay, ok := dataObj["okpay"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("expected okpay object, got %T", dataObj["okpay"])
+	}
+	if okpay["shop_id"] != "shop-admin-1" {
+		t.Fatalf("shop_id = %v, want shop-admin-1", okpay["shop_id"])
+	}
+	if okpay["shop_token"] != "token-admin-1" {
+		t.Fatalf("shop_token = %v, want token-admin-1", okpay["shop_token"])
+	}
+	if okpay["callback_url"] != "https://example.com/notify" {
+		t.Fatalf("callback_url = %v", okpay["callback_url"])
 	}
 }
 
