@@ -62,11 +62,12 @@ func buildSupportedAssets() ([]response.NetworkTokenSupport, error) {
 	return supports, nil
 }
 
-// GetPublicConfig returns payment config consumed by cashier/frontends.
-// The public route returns only non-sensitive epay/okpay knobs, while the
-// authenticated admin route also includes OkPay credentials and internal URLs.
+// GetPublicConfig returns payment/site config consumed by cashier/frontends.
+// The public route returns brand/site display config plus non-sensitive
+// epay/okpay knobs, while the authenticated admin route also includes OkPay
+// credentials and internal URLs.
 // @Summary      Get public payment config
-// @Description  Returns supported_assets and epay/okpay config used by cashier/frontends.
+// @Description  Returns supported_assets plus site, epay and okpay config used by cashier/frontends.
 // @Description  The authenticated admin variant (/admin/api/v1/config) also includes OkPay shop credentials and internal callback settings.
 // @Tags         Payment Config
 // @Produce      json
@@ -93,6 +94,12 @@ func (c *BaseCommController) GetPublicConfig(ctx echo.Context) error {
 	}
 	return c.SucJson(ctx, response.PublicConfigResponse{
 		SupportedAssets: supports,
+		Site: response.SitePublicConfig{
+			CashierName:  data.GetBrandCashierName(),
+			LogoURL:      data.GetBrandLogoURL(),
+			WebsiteTitle: data.GetBrandWebsiteTitle(),
+			SupportLink:  data.GetBrandSupportURL(),
+		},
 		Epay: response.EpayPublicConfig{
 			DefaultToken:    data.GetSettingString(mdb.SettingKeyEpayDefaultToken, "usdt"),
 			DefaultCurrency: data.GetSettingString(mdb.SettingKeyEpayDefaultCurrency, "cny"),

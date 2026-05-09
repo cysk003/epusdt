@@ -11,6 +11,13 @@ type EpayPublicConfig struct {
 	DefaultNetwork  string `json:"default_network" example:"tron"`
 }
 
+type SitePublicConfig struct {
+	CashierName  string `json:"cashier_name" example:"Acme Cashier"`
+	LogoURL      string `json:"logo_url" example:"https://cdn.example.com/logo.png"`
+	WebsiteTitle string `json:"website_title" example:"Acme Payments"`
+	SupportLink  string `json:"support_link" example:"https://example.com/support"`
+}
+
 type OkPayPublicConfig struct {
 	Enabled        bool     `json:"enabled" example:"true"`
 	AllowTokens    []string `json:"allow_tokens" example:"USDT,TRX"`
@@ -24,6 +31,7 @@ type OkPayPublicConfig struct {
 
 type PublicConfigResponse struct {
 	SupportedAssets []NetworkTokenSupport `json:"supported_assets"`
+	Site            SitePublicConfig      `json:"site"`
 	Epay            EpayPublicConfig      `json:"epay"`
 	OkPay           OkPayPublicConfig     `json:"okpay"`
 }

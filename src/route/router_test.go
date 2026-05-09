@@ -483,6 +483,18 @@ func TestGetSupportedAssets_WalletAddressToggle(t *testing.T) {
 
 func TestGetPublicConfig(t *testing.T) {
 	e := setupTestEnv(t)
+	if err := data.SetSetting(mdb.SettingGroupBrand, mdb.SettingKeyBrandCheckoutName, "asd", mdb.SettingTypeString); err != nil {
+		t.Fatalf("seed brand.checkout_name: %v", err)
+	}
+	if err := data.SetSetting(mdb.SettingGroupBrand, mdb.SettingKeyBrandLogoUrl, "https://cdn.example.com/logo.png", mdb.SettingTypeString); err != nil {
+		t.Fatalf("seed brand.logo_url: %v", err)
+	}
+	if err := data.SetSetting(mdb.SettingGroupBrand, mdb.SettingKeyBrandSiteTitle, "asd title", mdb.SettingTypeString); err != nil {
+		t.Fatalf("seed brand.site_title: %v", err)
+	}
+	if err := data.SetSetting(mdb.SettingGroupBrand, mdb.SettingKeyBrandSupportUrl, "https://example.com/support", mdb.SettingTypeString); err != nil {
+		t.Fatalf("seed brand.support_url: %v", err)
+	}
 
 	req := httptest.NewRequest(http.MethodGet, "/payments/gmpay/v1/config", nil)
 	rec := httptest.NewRecorder()
@@ -507,6 +519,22 @@ func TestGetPublicConfig(t *testing.T) {
 	}
 	if len(supports) < 2 {
 		t.Fatalf("expected >= 2 network supports, got %d", len(supports))
+	}
+	site, ok := respData["site"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("expected site object, got %T", respData["site"])
+	}
+	if site["cashier_name"] != "asd" {
+		t.Fatalf("site.cashier_name = %v, want asd", site["cashier_name"])
+	}
+	if site["logo_url"] != "https://cdn.example.com/logo.png" {
+		t.Fatalf("site.logo_url = %v", site["logo_url"])
+	}
+	if site["website_title"] != "asd title" {
+		t.Fatalf("site.website_title = %v, want asd title", site["website_title"])
+	}
+	if site["support_link"] != "https://example.com/support" {
+		t.Fatalf("site.support_link = %v", site["support_link"])
 	}
 	epay, ok := respData["epay"].(map[string]interface{})
 	if !ok {
@@ -547,6 +575,46 @@ func TestGetPublicConfig(t *testing.T) {
 
 	if got := data.GetOkPayCallbackURL(); got != "http://localhost:8080/payments/okpay/v1/notify" {
 		t.Fatalf("default okpay callback_url = %q, want %q", got, "http://localhost:8080/payments/okpay/v1/notify")
+	}
+}
+
+func TestGetPublicConfig_BrandLegacyFallback(t *testing.T) {
+	e := setupTestEnv(t)
+	if err := data.SetSetting(mdb.SettingGroupBrand, mdb.SettingKeyBrandSiteName, "legacy cashier", mdb.SettingTypeString); err != nil {
+		t.Fatalf("seed brand.site_name: %v", err)
+	}
+	if err := data.SetSetting(mdb.SettingGroupBrand, mdb.SettingKeyBrandPageTitle, "legacy title", mdb.SettingTypeString); err != nil {
+		t.Fatalf("seed brand.page_title: %v", err)
+	}
+	if err := data.SetSetting(mdb.SettingGroupBrand, mdb.SettingKeyBrandSupportUrl, "https://legacy.example.com/help", mdb.SettingTypeString); err != nil {
+		t.Fatalf("seed brand.support_url: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/payments/gmpay/v1/config", nil)
+	rec := httptest.NewRecorder()
+	e.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d, body=%s", rec.Code, rec.Body.String())
+	}
+
+	resp := parseResp(t, rec)
+	respData, ok := resp["data"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("expected object data, got %T", resp["data"])
+	}
+	site, ok := respData["site"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("expected site object, got %T", respData["site"])
+	}
+	if site["cashier_name"] != "legacy cashier" {
+		t.Fatalf("site.cashier_name = %v, want legacy cashier", site["cashier_name"])
+	}
+	if site["website_title"] != "legacy title" {
+		t.Fatalf("site.website_title = %v, want legacy title", site["website_title"])
+	}
+	if site["support_link"] != "https://legacy.example.com/help" {
+		t.Fatalf("site.support_link = %v", site["support_link"])
 	}
 }
 

@@ -158,6 +158,32 @@ var sensitiveSettingKeys = []string{
 	mdb.SettingKeyInitAdminPasswordChanged,
 }
 
+func getFirstNonEmptySetting(fallback string, keys ...string) string {
+	for _, key := range keys {
+		value := strings.TrimSpace(GetSettingString(key, ""))
+		if value != "" {
+			return value
+		}
+	}
+	return fallback
+}
+
+func GetBrandCashierName() string {
+	return getFirstNonEmptySetting("", mdb.SettingKeyBrandCheckoutName, mdb.SettingKeyBrandSiteName)
+}
+
+func GetBrandLogoURL() string {
+	return strings.TrimSpace(GetSettingString(mdb.SettingKeyBrandLogoUrl, ""))
+}
+
+func GetBrandWebsiteTitle() string {
+	return getFirstNonEmptySetting("", mdb.SettingKeyBrandSiteTitle, mdb.SettingKeyBrandPageTitle)
+}
+
+func GetBrandSupportURL() string {
+	return strings.TrimSpace(GetSettingString(mdb.SettingKeyBrandSupportUrl, ""))
+}
+
 // OkPay settings helpers keep the provider-specific defaults in one place so
 // business logic does not need to repeat raw settings keys.
 func GetOkPayEnabled() bool {

@@ -731,6 +731,9 @@ func TestAdminSettings_DeleteNonExistent(t *testing.T) {
 
 func TestAdminConfig_ExposesOkPayCredentials(t *testing.T) {
 	e, token := setupAdminTestEnv(t)
+	if err := data.SetSetting(mdb.SettingGroupBrand, mdb.SettingKeyBrandCheckoutName, "admin cashier", mdb.SettingTypeString); err != nil {
+		t.Fatalf("seed brand.checkout_name: %v", err)
+	}
 	if err := data.SetSetting(mdb.SettingGroupOkPay, mdb.SettingKeyOkPayEnabled, "true", mdb.SettingTypeBool); err != nil {
 		t.Fatalf("seed okpay.enabled: %v", err)
 	}
@@ -747,6 +750,13 @@ func TestAdminConfig_ExposesOkPayCredentials(t *testing.T) {
 	rec := doGetAdmin(e, "/admin/api/v1/config", token)
 	resp := assertOK(t, rec)
 	dataObj, _ := resp["data"].(map[string]interface{})
+	site, ok := dataObj["site"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("expected site object, got %T", dataObj["site"])
+	}
+	if site["cashier_name"] != "admin cashier" {
+		t.Fatalf("cashier_name = %v, want admin cashier", site["cashier_name"])
+	}
 	okpay, ok := dataObj["okpay"].(map[string]interface{})
 	if !ok {
 		t.Fatalf("expected okpay object, got %T", dataObj["okpay"])
@@ -760,6 +770,55 @@ func TestAdminConfig_ExposesOkPayCredentials(t *testing.T) {
 	if okpay["callback_url"] != "https://example.com/notify" {
 		t.Fatalf("callback_url = %v", okpay["callback_url"])
 	}
+}
+
+func TestAdminSettings_UpsertBrandReflectsInConfig(t *testing.T) {
+	e, token := setupAdminTestEnv(t)
+
+	updateBrand := func(cashier, logo, title, support string) {
+		rec := doPutAdmin(e, "/admin/api/v1/settings", map[string]interface{}{
+			"items": []map[string]interface{}{
+				{"group": mdb.SettingGroupBrand, "key": mdb.SettingKeyBrandCheckoutName, "value": cashier, "type": mdb.SettingTypeString},
+				{"group": mdb.SettingGroupBrand, "key": mdb.SettingKeyBrandLogoUrl, "value": logo, "type": mdb.SettingTypeString},
+				{"group": mdb.SettingGroupBrand, "key": mdb.SettingKeyBrandSiteTitle, "value": title, "type": mdb.SettingTypeString},
+				{"group": mdb.SettingGroupBrand, "key": mdb.SettingKeyBrandSupportUrl, "value": support, "type": mdb.SettingTypeString},
+			},
+		}, token)
+		assertOK(t, rec)
+	}
+
+	assertSite := func(path, wantCashier, wantLogo, wantTitle, wantSupport string) {
+		rec := doGet(e, path)
+		if strings.HasPrefix(path, "/admin/") {
+			rec = doGetAdmin(e, path, token)
+		}
+		resp := assertOK(t, rec)
+		dataObj, _ := resp["data"].(map[string]interface{})
+		site, ok := dataObj["site"].(map[string]interface{})
+		if !ok {
+			t.Fatalf("%s expected site object, got %T", path, dataObj["site"])
+		}
+		if site["cashier_name"] != wantCashier {
+			t.Fatalf("%s cashier_name=%v, want %s", path, site["cashier_name"], wantCashier)
+		}
+		if site["logo_url"] != wantLogo {
+			t.Fatalf("%s logo_url=%v, want %s", path, site["logo_url"], wantLogo)
+		}
+		if site["website_title"] != wantTitle {
+			t.Fatalf("%s website_title=%v, want %s", path, site["website_title"], wantTitle)
+		}
+		if site["support_link"] != wantSupport {
+			t.Fatalf("%s support_link=%v, want %s", path, site["support_link"], wantSupport)
+		}
+	}
+
+	updateBrand("cashier-v1", "https://cdn.example.com/v1.png", "title-v1", "https://example.com/help-v1")
+	assertSite("/payments/gmpay/v1/config", "cashier-v1", "https://cdn.example.com/v1.png", "title-v1", "https://example.com/help-v1")
+	assertSite("/admin/api/v1/config", "cashier-v1", "https://cdn.example.com/v1.png", "title-v1", "https://example.com/help-v1")
+
+	updateBrand("cashier-v2", "https://cdn.example.com/v2.png", "title-v2", "https://example.com/help-v2")
+	assertSite("/payments/gmpay/v1/config", "cashier-v2", "https://cdn.example.com/v2.png", "title-v2", "https://example.com/help-v2")
+	assertSite("/admin/api/v1/config", "cashier-v2", "https://cdn.example.com/v2.png", "title-v2", "https://example.com/help-v2")
 }
 
 // ─── Notification Channels ───────────────────────────────────────────────────
