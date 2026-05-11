@@ -38,14 +38,16 @@ func InitApp() {
 		}
 		// Seed admin account and JWT secret so the management console is
 		// immediately usable on a fresh install. Both are idempotent.
-		_, isNew, err := data.EnsureDefaultAdmin()
+		initialPassword, isNew, err := data.EnsureDefaultAdmin()
 		if err != nil {
 			color.Red.Printf("[bootstrap] ensure default admin err=%s\n", err)
 		}
 		if isNew {
 			color.Yellow.Println("╔════════════════════════════════════════════════════════════════════════╗")
-			color.Yellow.Println("║  Default admin account created. Fetch one-time password via API first!║")
-			color.Yellow.Printf("║  Username: admin                                                       ║\n")
+			color.Yellow.Println("║  Default admin account created. Save these credentials now.           ║")
+			color.Yellow.Printf("║  Username: %-54s║\n", "admin")
+			color.Yellow.Printf("║  Password: %-54s║\n", initialPassword)
+			color.Yellow.Println("║  The one-time password API remains available until first fetch.       ║")
 			color.Yellow.Println("║  GET /admin/api/v1/auth/init-password (one-time)                      ║")
 			color.Yellow.Println("╚════════════════════════════════════════════════════════════════════════╝")
 		}
