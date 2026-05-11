@@ -36,47 +36,64 @@ func ResolveTronNode() (string, string, error) {
 	return resolveTronNode()
 }
 
-func TryProcessTronTRC20Transfer(toAddr string, rawValue *big.Int, txHash string, blockTsMs int64) {
+func TryProcessTronTRC20Transfer(token mdb.ChainToken, toAddr string, rawValue *big.Int, txHash string, blockTsMs int64) {
+	tokenSym := strings.ToUpper(strings.TrimSpace(token.Symbol))
 	defer func() {
 		if err := recover(); err != nil {
-			log.Sugar.Errorf("[TRC20][%s] TryProcessTronTRC20Transfer panic: %v", toAddr, err)
+			log.Sugar.Errorf("[TRC20-%s][%s] TryProcessTronTRC20Transfer panic: %v", tokenSym, toAddr, err)
 		}
 	}()
 
 	addr := strings.TrimSpace(toAddr)
-	if addr == "" || rawValue == nil || rawValue.Sign() <= 0 {
+	if tokenSym == "" || addr == "" || rawValue == nil || rawValue.Sign() <= 0 {
 		return
+	}
+	decimals := token.Decimals
+	if decimals < 0 {
+		decimals = 0
 	}
 
 	decimalQuant := decimal.NewFromBigInt(rawValue, 0)
-	amount := math.MustParsePrecFloat64(decimalQuant.Div(decimal.NewFromInt(1_000_000)).InexactFloat64(), 2)
+	amount := math.MustParsePrecFloat64(decimalQuant.Div(decimal.New(1, int32(decimals))).InexactFloat64(), 2)
 	if amount <= 0 {
 		return
 	}
+	if token.MinAmount > 0 && amount < token.MinAmount {
+		log.Sugar.Debugf("[TRC20-%s][%s] skip below min amount hash=%s amount=%.2f min=%.2f", tokenSym, addr, txHash, amount, token.MinAmount)
+		return
+	}
 
-	tradeID, err := data.GetTradeIdByWalletAddressAndAmountAndToken(mdb.NetworkTron, addr, "USDT", amount)
+	tradeID, err := data.GetTradeIdByWalletAddressAndAmountAndToken(mdb.NetworkTron, addr, tokenSym, amount)
 	if err != nil {
-		log.Sugar.Warnf("[TRC20][%s] lock lookup: %v", addr, err)
+		log.Sugar.Warnf("[TRC20-%s][%s] lock lookup: %v", tokenSym, addr, err)
 		return
 	}
 	if tradeID == "" {
-		log.Sugar.Debugf("[TRC20][%s] skip unmatched tx hash=%s amount=%.2f", addr, txHash, amount)
+		log.Sugar.Debugf("[TRC20-%s][%s] skip unmatched tx hash=%s amount=%.2f", tokenSym, addr, txHash, amount)
 		return
 	}
 
 	order, err := data.GetOrderInfoByTradeId(tradeID)
 	if err != nil {
-		log.Sugar.Warnf("[TRC20][%s] load order: %v", addr, err)
+		log.Sugar.Warnf("[TRC20-%s][%s] load order: %v", tokenSym, addr, err)
+		return
+	}
+	if strings.ToLower(strings.TrimSpace(order.Network)) != mdb.NetworkTron {
+		log.Sugar.Warnf("[TRC20-%s][%s] skip trade_id=%s network=%q", tokenSym, addr, tradeID, order.Network)
+		return
+	}
+	if strings.ToUpper(strings.TrimSpace(order.Token)) != tokenSym {
+		log.Sugar.Warnf("[TRC20-%s][%s] skip trade_id=%s token mismatch order=%s", tokenSym, addr, tradeID, order.Token)
 		return
 	}
 	if blockTsMs > 0 && blockTsMs < order.CreatedAt.TimestampMilli() {
-		log.Sugar.Warnf("[TRC20][%s] skip tx %s because block time %d is before order create time %d", addr, txHash, blockTsMs, order.CreatedAt.TimestampMilli())
+		log.Sugar.Warnf("[TRC20-%s][%s] skip tx %s because block time %d is before order create time %d", tokenSym, addr, txHash, blockTsMs, order.CreatedAt.TimestampMilli())
 		return
 	}
 
 	req := &request.OrderProcessingRequest{
 		ReceiveAddress:     addr,
-		Token:              "USDT",
+		Token:              tokenSym,
 		Network:            mdb.NetworkTron,
 		TradeId:            tradeID,
 		Amount:             amount,
@@ -85,15 +102,15 @@ func TryProcessTronTRC20Transfer(toAddr string, rawValue *big.Int, txHash string
 	err = OrderProcessing(req)
 	if err != nil {
 		if errors.Is(err, constant.OrderBlockAlreadyProcess) || errors.Is(err, constant.OrderStatusConflict) {
-			log.Sugar.Infof("[TRC20][%s] skip resolved transfer trade_id=%s hash=%s err=%v", addr, tradeID, txHash, err)
+			log.Sugar.Infof("[TRC20-%s][%s] skip resolved transfer trade_id=%s hash=%s err=%v", tokenSym, addr, tradeID, txHash, err)
 			return
 		}
-		log.Sugar.Errorf("[TRC20][%s] OrderProcessing trade_id=%s hash=%s: %v", addr, tradeID, txHash, err)
+		log.Sugar.Errorf("[TRC20-%s][%s] OrderProcessing trade_id=%s hash=%s: %v", tokenSym, addr, tradeID, txHash, err)
 		return
 	}
 
 	sendPaymentNotification(order)
-	log.Sugar.Infof("[TRC20][%s] payment processed trade_id=%s hash=%s", addr, tradeID, txHash)
+	log.Sugar.Infof("[TRC20-%s][%s] payment processed trade_id=%s hash=%s", tokenSym, addr, tradeID, txHash)
 }
 
 func TryProcessTronTRXTransfer(toAddr string, rawSun int64, txHash string, blockTsMs int64) {
