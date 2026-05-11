@@ -718,6 +718,63 @@ func TestAdminSettings_ListAndUpsert(t *testing.T) {
 	assertOK(t, rec)
 }
 
+func TestAdminSettings_AmountPrecisionValidationAndListing(t *testing.T) {
+	e, token := setupAdminTestEnv(t)
+
+	rec := doPutAdmin(e, "/admin/api/v1/settings", map[string]interface{}{
+		"items": []map[string]interface{}{
+			{"group": "system", "key": mdb.SettingKeyAmountPrecision, "value": "4", "type": "int"},
+		},
+	}, token)
+	resp := assertOK(t, rec)
+	results, ok := resp["data"].([]interface{})
+	if !ok || len(results) != 1 {
+		t.Fatalf("expected one result, got %T %v", resp["data"], resp["data"])
+	}
+	result, _ := results[0].(map[string]interface{})
+	if result["ok"] != true {
+		t.Fatalf("amount precision upsert result = %v", result)
+	}
+
+	rec = doGetAdmin(e, "/admin/api/v1/settings?group=system", token)
+	resp = assertOK(t, rec)
+	rows, ok := resp["data"].([]interface{})
+	if !ok {
+		t.Fatalf("expected settings array, got %T", resp["data"])
+	}
+	found := false
+	for _, row := range rows {
+		item, _ := row.(map[string]interface{})
+		if item["key"] == mdb.SettingKeyAmountPrecision {
+			found = true
+			if item["value"] != "4" {
+				t.Fatalf("amount precision value = %v, want 4", item["value"])
+			}
+		}
+	}
+	if !found {
+		t.Fatalf("expected settings list to include %s", mdb.SettingKeyAmountPrecision)
+	}
+
+	rec = doPutAdmin(e, "/admin/api/v1/settings", map[string]interface{}{
+		"items": []map[string]interface{}{
+			{"group": "system", "key": mdb.SettingKeyAmountPrecision, "value": "7", "type": "int"},
+			{"group": "system", "key": mdb.SettingKeyAmountPrecision, "value": "abc", "type": "int"},
+		},
+	}, token)
+	resp = assertOK(t, rec)
+	results, ok = resp["data"].([]interface{})
+	if !ok || len(results) != 2 {
+		t.Fatalf("expected two results, got %T %v", resp["data"], resp["data"])
+	}
+	for _, item := range results {
+		result, _ := item.(map[string]interface{})
+		if result["ok"] != false {
+			t.Fatalf("invalid amount precision result = %v, want ok=false", result)
+		}
+	}
+}
+
 // TestAdminSettings_DeleteNonExistent verifies deleting a non-existent setting.
 func TestAdminSettings_DeleteNonExistent(t *testing.T) {
 	e, token := setupAdminTestEnv(t)
@@ -775,19 +832,21 @@ func TestAdminConfig_ExposesOkPayCredentials(t *testing.T) {
 func TestAdminSettings_UpsertBrandReflectsInConfig(t *testing.T) {
 	e, token := setupAdminTestEnv(t)
 
-	updateBrand := func(cashier, logo, title, support string) {
+	updateBrand := func(cashier, logo, title, support, bgColor, bgImage string) {
 		rec := doPutAdmin(e, "/admin/api/v1/settings", map[string]interface{}{
 			"items": []map[string]interface{}{
 				{"group": mdb.SettingGroupBrand, "key": mdb.SettingKeyBrandCheckoutName, "value": cashier, "type": mdb.SettingTypeString},
 				{"group": mdb.SettingGroupBrand, "key": mdb.SettingKeyBrandLogoUrl, "value": logo, "type": mdb.SettingTypeString},
 				{"group": mdb.SettingGroupBrand, "key": mdb.SettingKeyBrandSiteTitle, "value": title, "type": mdb.SettingTypeString},
 				{"group": mdb.SettingGroupBrand, "key": mdb.SettingKeyBrandSupportUrl, "value": support, "type": mdb.SettingTypeString},
+				{"group": mdb.SettingGroupBrand, "key": mdb.SettingKeyBrandBackgroundColor, "value": bgColor, "type": mdb.SettingTypeString},
+				{"group": mdb.SettingGroupBrand, "key": mdb.SettingKeyBrandBackgroundImageUrl, "value": bgImage, "type": mdb.SettingTypeString},
 			},
 		}, token)
 		assertOK(t, rec)
 	}
 
-	assertSite := func(path, wantCashier, wantLogo, wantTitle, wantSupport string) {
+	assertSite := func(path, wantCashier, wantLogo, wantTitle, wantSupport, wantBgColor, wantBgImage string) {
 		rec := doGet(e, path)
 		if strings.HasPrefix(path, "/admin/") {
 			rec = doGetAdmin(e, path, token)
@@ -810,15 +869,21 @@ func TestAdminSettings_UpsertBrandReflectsInConfig(t *testing.T) {
 		if site["support_link"] != wantSupport {
 			t.Fatalf("%s support_link=%v, want %s", path, site["support_link"], wantSupport)
 		}
+		if site["background_color"] != wantBgColor {
+			t.Fatalf("%s background_color=%v, want %s", path, site["background_color"], wantBgColor)
+		}
+		if site["background_image_url"] != wantBgImage {
+			t.Fatalf("%s background_image_url=%v, want %s", path, site["background_image_url"], wantBgImage)
+		}
 	}
 
-	updateBrand("cashier-v1", "https://cdn.example.com/v1.png", "title-v1", "https://example.com/help-v1")
-	assertSite("/payments/gmpay/v1/config", "cashier-v1", "https://cdn.example.com/v1.png", "title-v1", "https://example.com/help-v1")
-	assertSite("/admin/api/v1/config", "cashier-v1", "https://cdn.example.com/v1.png", "title-v1", "https://example.com/help-v1")
+	updateBrand("cashier-v1", "https://cdn.example.com/v1.png", "title-v1", "https://example.com/help-v1", "#111111", "https://cdn.example.com/bg-v1.png")
+	assertSite("/payments/gmpay/v1/config", "cashier-v1", "https://cdn.example.com/v1.png", "title-v1", "https://example.com/help-v1", "#111111", "https://cdn.example.com/bg-v1.png")
+	assertSite("/admin/api/v1/config", "cashier-v1", "https://cdn.example.com/v1.png", "title-v1", "https://example.com/help-v1", "#111111", "https://cdn.example.com/bg-v1.png")
 
-	updateBrand("cashier-v2", "https://cdn.example.com/v2.png", "title-v2", "https://example.com/help-v2")
-	assertSite("/payments/gmpay/v1/config", "cashier-v2", "https://cdn.example.com/v2.png", "title-v2", "https://example.com/help-v2")
-	assertSite("/admin/api/v1/config", "cashier-v2", "https://cdn.example.com/v2.png", "title-v2", "https://example.com/help-v2")
+	updateBrand("cashier-v2", "https://cdn.example.com/v2.png", "title-v2", "https://example.com/help-v2", "#222222", "https://cdn.example.com/bg-v2.png")
+	assertSite("/payments/gmpay/v1/config", "cashier-v2", "https://cdn.example.com/v2.png", "title-v2", "https://example.com/help-v2", "#222222", "https://cdn.example.com/bg-v2.png")
+	assertSite("/admin/api/v1/config", "cashier-v2", "https://cdn.example.com/v2.png", "title-v2", "https://example.com/help-v2", "#222222", "https://cdn.example.com/bg-v2.png")
 }
 
 // ─── Notification Channels ───────────────────────────────────────────────────

@@ -12,13 +12,13 @@ import (
 	"time"
 
 	tron "github.com/GMWalletApp/epusdt/crypto"
+	"github.com/GMWalletApp/epusdt/model/data"
+	"github.com/GMWalletApp/epusdt/model/mdb"
 	"github.com/GMWalletApp/epusdt/model/service"
 	"github.com/GMWalletApp/epusdt/util/log"
 )
 
 const (
-	// USDT 合约地址 (TRC20 主网)
-	USDTContractHex = "41a614f803b6fd780986a42c78ec9c7f77e6ded13c" // Base58: TR7NHqjeKQxGTCi8q8ZY4pL8otSzgjLj6t
 	// transfer(address,uint256) 方法签名前4字节
 	TransferMethodID = "a9059cbb"
 
@@ -44,6 +44,31 @@ func HexToTronAddress(hexAddr string) (string, error) {
 	}
 
 	return tron.EncodeCheck(raw), nil
+}
+
+func TronAddressToHex(addr string) (string, error) {
+	addr = strings.TrimSpace(addr)
+	if addr == "" {
+		return "", fmt.Errorf("地址为空")
+	}
+	raw, err := tron.DecodeCheck(addr)
+	if err != nil {
+		return "", err
+	}
+	if len(raw) != 21 {
+		return "", fmt.Errorf("地址长度非法: %d bytes", len(raw))
+	}
+	if raw[0] != 0x41 {
+		return "", fmt.Errorf("非法 TRON 主网地址前缀: 0x%x", raw[0])
+	}
+	return strings.ToLower(hex.EncodeToString(raw)), nil
+}
+
+func normalizeTronHexAddress(hexAddr string) string {
+	hexAddr = strings.TrimSpace(hexAddr)
+	hexAddr = strings.TrimPrefix(hexAddr, "0x")
+	hexAddr = strings.TrimPrefix(hexAddr, "0X")
+	return strings.ToLower(hexAddr)
 }
 
 type BlockHeader struct {
@@ -89,12 +114,13 @@ type Block struct {
 	Transactions []Transaction `json:"transactions"`
 }
 
-type USDTTransfer struct {
+type TRC20Transfer struct {
 	TxID   string
 	From   string
 	To     string
-	Raw    *big.Int // 原始数值（6 decimals）
+	Raw    *big.Int
 	Status string
+	Token  mdb.ChainToken
 }
 
 type TRXTransfer struct {
@@ -156,7 +182,33 @@ func GetBlockByNum(baseURL string, apiKey string, num int64) (*Block, error) {
 	return &block, json.Unmarshal(b, &block)
 }
 
-func parseUSDTTransfer(tx Transaction) *USDTTransfer {
+func loadTronTRC20TokenMap() map[string]mdb.ChainToken {
+	tokens, err := data.ListEnabledChainTokensByNetwork(mdb.NetworkTron)
+	if err != nil {
+		log.Sugar.Warnf("[TRON-BLOCK] load chain_tokens: %v", err)
+		return nil
+	}
+	tokenMap := make(map[string]mdb.ChainToken)
+	for _, token := range tokens {
+		symbol := strings.ToUpper(strings.TrimSpace(token.Symbol))
+		contractAddress := strings.TrimSpace(token.ContractAddress)
+		if symbol == "TRX" || contractAddress == "" {
+			continue
+		}
+		contractHex, err := TronAddressToHex(contractAddress)
+		if err != nil {
+			log.Sugar.Warnf("[TRON-BLOCK] skip invalid TRC20 contract symbol=%s address=%s err=%v", symbol, contractAddress, err)
+			continue
+		}
+		tokenMap[contractHex] = token
+	}
+	return tokenMap
+}
+
+func parseTRC20Transfer(tx Transaction, tokenMap map[string]mdb.ChainToken) *TRC20Transfer {
+	if len(tokenMap) == 0 {
+		return nil
+	}
 	if len(tx.RawData.Contract) == 0 {
 		return nil
 	}
@@ -170,9 +222,9 @@ func parseUSDTTransfer(tx Transaction) *USDTTransfer {
 		return nil
 	}
 
-	// 检查是否是 USDT 合约
-	contractHex := strings.ToLower(strings.TrimPrefix(val.ContractAddress, "0x"))
-	if contractHex != USDTContractHex {
+	contractHex := normalizeTronHexAddress(val.ContractAddress)
+	token, ok := tokenMap[contractHex]
+	if !ok {
 		return nil
 	}
 
@@ -213,12 +265,13 @@ func parseUSDTTransfer(tx Transaction) *USDTTransfer {
 		status = tx.Ret[0].ContractRet
 	}
 
-	return &USDTTransfer{
+	return &TRC20Transfer{
 		TxID:   tx.TxID,
 		From:   fromAddr,
 		To:     toAddr,
 		Raw:    amountBig,
 		Status: status,
+		Token:  token,
 	}
 }
 
@@ -262,14 +315,14 @@ func parseTRXTransfer(tx Transaction) *TRXTransfer {
 	}
 }
 
-func processBlock(block *Block) {
+func processBlock(block *Block, tokenMap map[string]mdb.ChainToken) {
 	blockTsMs := block.BlockHeader.RawData.Timestamp
 	for _, tx := range block.Transactions {
-		if t := parseUSDTTransfer(tx); t != nil {
+		if t := parseTRC20Transfer(tx, tokenMap); t != nil {
 			if t.Status != "SUCCESS" {
 				continue
 			}
-			service.TryProcessTronTRC20Transfer(t.To, t.Raw, t.TxID, blockTsMs)
+			service.TryProcessTronTRC20Transfer(t.Token, t.To, t.Raw, t.TxID, blockTsMs)
 			continue
 		}
 		if t := parseTRXTransfer(tx); t != nil {
@@ -286,9 +339,9 @@ type Scanner struct {
 	apiKey    string
 	lastBlock int64
 	// 统计
-	totalBlocks  int64
-	totalUSDTTxs int64
-	totalTRXTxs  int64
+	totalBlocks   int64
+	totalTRC20Txs int64
+	totalTRXTxs   int64
 }
 
 func NewScanner() *Scanner {
@@ -314,7 +367,7 @@ func (s *Scanner) Init() error {
 }
 
 func (s *Scanner) Run() {
-	log.Sugar.Info("[TRON-BLOCK] start scanning (USDT TRC20 + TRX)")
+	log.Sugar.Info("[TRON-BLOCK] start scanning (TRC20 + TRX)")
 	ticker := time.NewTicker(PollInterval)
 	defer ticker.Stop()
 
@@ -324,7 +377,7 @@ func (s *Scanner) Run() {
 	for {
 		select {
 		case <-statTicker.C:
-			log.Sugar.Infof("[TRON-BLOCK] stats blocks=%d usdt=%d trx=%d", s.totalBlocks, s.totalUSDTTxs, s.totalTRXTxs)
+			log.Sugar.Infof("[TRON-BLOCK] stats blocks=%d trc20=%d trx=%d", s.totalBlocks, s.totalTRC20Txs, s.totalTRXTxs)
 		case <-ticker.C:
 			s.poll()
 		}
@@ -342,6 +395,7 @@ func (s *Scanner) poll() {
 		return
 	}
 
+	tokenMap := loadTronTRC20TokenMap()
 	for num := s.lastBlock + 1; num <= latestNum; num++ {
 		var block *Block
 		if num == latestNum {
@@ -354,13 +408,13 @@ func (s *Scanner) poll() {
 			}
 			time.Sleep(200 * time.Millisecond)
 		}
-		processBlock(block)
+		processBlock(block, tokenMap)
 		s.lastBlock = num
 		s.totalBlocks++
 
 		for _, tx := range block.Transactions {
-			if parseUSDTTransfer(tx) != nil {
-				s.totalUSDTTxs++
+			if parseTRC20Transfer(tx, tokenMap) != nil {
+				s.totalTRC20Txs++
 			} else if parseTRXTransfer(tx) != nil {
 				s.totalTRXTxs++
 			}
@@ -369,10 +423,15 @@ func (s *Scanner) poll() {
 }
 
 func StartTronBlockScannerListener() {
-	scanner := NewScanner()
-	if err := scanner.Init(); err != nil {
-		log.Sugar.Errorf("[TRON-BLOCK] init: %v", err)
-		return
+	for {
+		scanner := NewScanner()
+		if err := scanner.Init(); err != nil {
+			log.Sugar.Errorf("[TRON-BLOCK] init: %v, retrying...", err)
+			time.Sleep(10 * time.Second)
+			continue
+		}
+		scanner.Run()
+		log.Sugar.Warn("[TRON-BLOCK] scanner stopped, restarting...")
+		time.Sleep(3 * time.Second)
 	}
-	scanner.Run()
 }
