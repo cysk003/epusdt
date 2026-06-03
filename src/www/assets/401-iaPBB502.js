@@ -1,0 +1,1 @@
+import{t as e}from"./unauthorized-error-B2A_wHaW.js";var t=e;export{t as component};
