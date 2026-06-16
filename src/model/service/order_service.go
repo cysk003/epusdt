@@ -70,14 +70,43 @@ func ensureEnabledOrderAsset(network, token string) (*mdb.ChainToken, error) {
 	return tokenRow, nil
 }
 
+func validateCreateTransactionTokenNetwork(token, network string) error {
+	if (token == "") != (network == "") {
+		return constant.ParamsMarshalErr
+	}
+	return nil
+}
+
+func buildCreateTransactionResponse(order *mdb.Orders) *response.CreateTransactionResponse {
+	return &response.CreateTransactionResponse{
+		TradeId:        order.TradeId,
+		OrderId:        order.OrderId,
+		Amount:         order.Amount,
+		Currency:       order.Currency,
+		ActualAmount:   order.ActualAmount,
+		ReceiveAddress: order.ReceiveAddress,
+		Token:          order.Token,
+		Status:         order.Status,
+		ExpirationTime: carbon.Now().AddMinutes(config.GetOrderExpirationTime()).Timestamp(),
+		PaymentUrl:     fmt.Sprintf("%s/pay/checkout-counter/%s", config.GetAppUri(), order.TradeId),
+	}
+}
+
 // CreateTransaction creates a new payment order.
 func CreateTransaction(req *request.CreateTransactionRequest, apiKey *mdb.ApiKey) (*response.CreateTransactionResponse, error) {
 	token := strings.ToUpper(strings.TrimSpace(req.Token))
 	currency := strings.ToUpper(strings.TrimSpace(req.Currency))
 	network := strings.ToLower(strings.TrimSpace(req.Network))
+	if err := validateCreateTransactionTokenNetwork(token, network); err != nil {
+		return nil, err
+	}
 	notifyURL := strings.TrimSpace(req.NotifyUrl)
 	if err := security.ValidatePublicHTTPURL(notifyURL); err != nil {
 		return nil, constant.NotifyURLErr
+	}
+	paymentType := mdb.PaymentTypeGmpay
+	if strings.EqualFold(req.PaymentType, mdb.PaymentTypeEpay) {
+		paymentType = mdb.PaymentTypeEpay
 	}
 
 	gCreateTransactionLock.Lock()
@@ -93,6 +122,32 @@ func CreateTransaction(req *request.CreateTransactionRequest, apiKey *mdb.ApiKey
 		return nil, constant.OrderAlreadyExists
 	}
 
+	decimalPayAmount := decimal.NewFromFloat(payAmount)
+	if decimalPayAmount.Cmp(decimal.NewFromFloat(CnyMinimumPaymentAmount)) == -1 {
+		return nil, constant.PayAmountErr
+	}
+
+	if token == "" && network == "" {
+		tradeID := GenerateCode()
+		order := &mdb.Orders{
+			TradeId:     tradeID,
+			OrderId:     req.OrderId,
+			Amount:      payAmount,
+			Currency:    currency,
+			Status:      mdb.StatusWaitSelect,
+			NotifyUrl:   notifyURL,
+			RedirectUrl: req.RedirectUrl,
+			Name:        req.Name,
+			PaymentType: paymentType,
+			PayProvider: mdb.PaymentProviderOnChain,
+			ApiKeyID:    apiKeyID(apiKey),
+		}
+		if err = data.CreateOrderWithTransaction(dao.Mdb, order); err != nil {
+			return nil, err
+		}
+		return buildCreateTransactionResponse(order), nil
+	}
+
 	if !data.IsChainEnabled(network) {
 		return nil, constant.ChainNotEnabled
 	}
@@ -105,11 +160,7 @@ func CreateTransaction(req *request.CreateTransactionRequest, apiKey *mdb.ApiKey
 		return nil, constant.RateAmountErr
 	}
 
-	decimalPayAmount := decimal.NewFromFloat(payAmount)
 	decimalTokenAmount := decimalPayAmount.Mul(decimal.NewFromFloat(rate))
-	if decimalPayAmount.Cmp(decimal.NewFromFloat(CnyMinimumPaymentAmount)) == -1 {
-		return nil, constant.PayAmountErr
-	}
 	if decimalTokenAmount.Cmp(decimal.NewFromFloat(UsdtMinimumPaymentAmount)) == -1 {
 		return nil, constant.PayAmountErr
 	}
@@ -146,7 +197,7 @@ func CreateTransaction(req *request.CreateTransactionRequest, apiKey *mdb.ApiKey
 		NotifyUrl:      notifyURL,
 		RedirectUrl:    req.RedirectUrl,
 		Name:           req.Name,
-		PaymentType:    req.PaymentType,
+		PaymentType:    paymentType,
 		PayProvider:    mdb.PaymentProviderOnChain,
 		ApiKeyID:       apiKeyID(apiKey),
 	}
@@ -161,19 +212,7 @@ func CreateTransaction(req *request.CreateTransactionRequest, apiKey *mdb.ApiKey
 		return nil, err
 	}
 
-	expirationTime := carbon.Now().AddMinutes(config.GetOrderExpirationTime()).Timestamp()
-	resp := &response.CreateTransactionResponse{
-		TradeId:        order.TradeId,
-		OrderId:        order.OrderId,
-		Amount:         order.Amount,
-		Currency:       order.Currency,
-		ActualAmount:   order.ActualAmount,
-		ReceiveAddress: order.ReceiveAddress,
-		Token:          order.Token,
-		ExpirationTime: expirationTime,
-		PaymentUrl:     fmt.Sprintf("%s/pay/checkout-counter/%s", config.GetAppUri(), order.TradeId),
-	}
-	return resp, nil
+	return buildCreateTransactionResponse(order), nil
 }
 
 // OrderProcessing marks an order as paid and releases its sqlite reservation.
@@ -206,14 +245,20 @@ func OrderProcessing(req *request.OrderProcessingRequest) error {
 		return err
 	}
 
-	if err = data.UnLockTransaction(req.Network, req.ReceiveAddress, req.Token, req.Amount); err != nil {
-		log.Sugar.Warnf("[order] unlock transaction after pay success failed, trade_id=%s, err=%v", req.TradeId, err)
-	}
-
 	// Load order to check parent-child relationship
 	order, err := data.GetOrderInfoByTradeId(req.TradeId)
 	if err != nil {
+		if strings.TrimSpace(req.Network) != "" && strings.TrimSpace(req.ReceiveAddress) != "" && strings.TrimSpace(req.Token) != "" && req.Amount > 0 {
+			if unlockErr := data.UnLockTransaction(req.Network, req.ReceiveAddress, req.Token, req.Amount); unlockErr != nil {
+				log.Sugar.Warnf("[order] fallback unlock transaction after pay success failed, trade_id=%s, err=%v", req.TradeId, unlockErr)
+			}
+		}
 		return fmt.Errorf("load paid order failed, trade_id=%s: %w", req.TradeId, err)
+	}
+	if hasTransactionLock(order) {
+		if err = data.UnLockTransaction(order.Network, order.ReceiveAddress, order.Token, order.ActualAmount); err != nil {
+			log.Sugar.Warnf("[order] unlock transaction after pay success failed, trade_id=%s, err=%v", order.TradeId, err)
+		}
 	}
 
 	// Parent order paid directly: expire all sub-orders and release their locks
@@ -232,8 +277,10 @@ func OrderProcessing(req *request.OrderProcessingRequest) error {
 					log.Sugar.Warnf("[order] expire provider order failed, trade_id=%s, provider=%s, err=%v", sub.TradeId, sub.PayProvider, err)
 				}
 			}
-			if err = data.UnLockTransaction(sub.Network, sub.ReceiveAddress, sub.Token, sub.ActualAmount); err != nil {
-				log.Sugar.Warnf("[order] unlock sub-order transaction failed, trade_id=%s, err=%v", sub.TradeId, err)
+			if hasTransactionLock(&sub) {
+				if err = data.UnLockTransaction(sub.Network, sub.ReceiveAddress, sub.Token, sub.ActualAmount); err != nil {
+					log.Sugar.Warnf("[order] unlock sub-order transaction failed, trade_id=%s, err=%v", sub.TradeId, err)
+				}
 			}
 		}
 		return nil
@@ -284,8 +331,10 @@ func OrderProcessing(req *request.OrderProcessingRequest) error {
 	}
 
 	// Release parent's own wallet lock
-	if err = data.UnLockTransaction(parent.Network, parent.ReceiveAddress, parent.Token, parent.ActualAmount); err != nil {
-		log.Sugar.Warnf("[order] unlock parent transaction failed, parent_trade_id=%s, err=%v", parent.TradeId, err)
+	if hasTransactionLock(parent) {
+		if err = data.UnLockTransaction(parent.Network, parent.ReceiveAddress, parent.Token, parent.ActualAmount); err != nil {
+			log.Sugar.Warnf("[order] unlock parent transaction failed, parent_trade_id=%s, err=%v", parent.TradeId, err)
+		}
 	}
 
 	// Release sibling locks after their status transitions commit.
@@ -295,8 +344,10 @@ func OrderProcessing(req *request.OrderProcessingRequest) error {
 				log.Sugar.Warnf("[order] expire sibling provider order failed, trade_id=%s, provider=%s, err=%v", sib.TradeId, sib.PayProvider, err)
 			}
 		}
-		if err = data.UnLockTransaction(sib.Network, sib.ReceiveAddress, sib.Token, sib.ActualAmount); err != nil {
-			log.Sugar.Warnf("[order] unlock sibling transaction failed, trade_id=%s, err=%v", sib.TradeId, err)
+		if hasTransactionLock(&sib) {
+			if err = data.UnLockTransaction(sib.Network, sib.ReceiveAddress, sib.Token, sib.ActualAmount); err != nil {
+				log.Sugar.Warnf("[order] unlock sibling transaction failed, trade_id=%s, err=%v", sib.TradeId, err)
+			}
 		}
 	}
 
@@ -448,9 +499,20 @@ func isOnChainOrder(payProvider string) bool {
 	return payProvider == "" || payProvider == mdb.PaymentProviderOnChain
 }
 
-const MaxSubOrders = 2
+func hasTransactionLock(order *mdb.Orders) bool {
+	return order != nil &&
+		isOnChainOrder(order.PayProvider) &&
+		strings.TrimSpace(order.Network) != "" &&
+		strings.TrimSpace(order.ReceiveAddress) != "" &&
+		strings.TrimSpace(order.Token) != "" &&
+		order.ActualAmount > 0
+}
 
-// SwitchNetwork creates or returns an existing sub-order for a different token+network.
+const MaxSubOrders = 1
+
+// SwitchNetwork completes a status=4 placeholder in place, or creates/returns
+// an existing sub-order for a different payment target once the parent is
+// already concrete.
 func SwitchNetwork(req *request.SwitchNetworkRequest) (*response.CheckoutCounterResponse, error) {
 	gCreateTransactionLock.Lock()
 	defer gCreateTransactionLock.Unlock()
@@ -469,12 +531,16 @@ func SwitchNetwork(req *request.SwitchNetworkRequest) (*response.CheckoutCounter
 	if parent.ParentTradeId != "" {
 		return nil, constant.CannotSwitchSubOrder
 	}
-	if parent.Status != mdb.StatusWaitPay {
+	if parent.Status != mdb.StatusWaitPay && parent.Status != mdb.StatusWaitSelect {
 		return nil, constant.OrderNotWaitPay
 	}
 
 	if network == mdb.PaymentProviderOkPay {
 		return switchToOkPay(parent, token)
+	}
+
+	if parent.Status == mdb.StatusWaitSelect {
+		return completeWaitSelectOrder(parent, token, network)
 	}
 
 	// 2. Same token+network as parent → mark selected and return
@@ -497,8 +563,9 @@ func SwitchNetwork(req *request.SwitchNetworkRequest) (*response.CheckoutCounter
 		return buildCheckoutResponse(existing), nil
 	}
 
-	// 4. Check sub-order limit
-	count, err := data.CountActiveSubOrders(parent.TradeId)
+	// 4. Only one sub-order may ever be created under a parent. Existing
+	// active sub-orders are reused above; any other target after that is blocked.
+	count, err := data.CountSubOrders(parent.TradeId)
 	if err != nil {
 		return nil, err
 	}
@@ -585,7 +652,63 @@ func SwitchNetwork(req *request.SwitchNetworkRequest) (*response.CheckoutCounter
 	return buildCheckoutResponse(subOrder), nil
 }
 
+func completeWaitSelectOrder(parent *mdb.Orders, token string, network string) (*response.CheckoutCounterResponse, error) {
+	if !data.IsChainEnabled(network) {
+		return nil, constant.ChainNotEnabled
+	}
+	if _, err := ensureEnabledOrderAsset(network, token); err != nil {
+		return nil, err
+	}
+
+	rate := config.GetRateForCoin(strings.ToLower(token), strings.ToLower(parent.Currency))
+	if rate <= 0 {
+		return nil, constant.RateAmountErr
+	}
+	decimalPayAmount := decimal.NewFromFloat(parent.Amount)
+	decimalTokenAmount := decimalPayAmount.Mul(decimal.NewFromFloat(rate))
+	if decimalTokenAmount.Cmp(decimal.NewFromFloat(UsdtMinimumPaymentAmount)) == -1 {
+		return nil, constant.PayAmountErr
+	}
+
+	walletAddress, err := data.GetAvailableWalletAddressByNetwork(network)
+	if err != nil {
+		return nil, err
+	}
+	if len(walletAddress) <= 0 {
+		return nil, constant.NotAvailableWalletAddress
+	}
+
+	amount := math.MustParsePrecFloat64(decimalTokenAmount.InexactFloat64(), data.GetAmountPrecision())
+	availableAddress, availableAmount, err := ReserveAvailableWalletAndAmount(parent.TradeId, network, token, amount, walletAddress)
+	if err != nil {
+		return nil, err
+	}
+	if availableAddress == "" {
+		return nil, constant.NotAvailableAmountErr
+	}
+
+	updated, err := data.CompleteWaitSelectOrder(parent.TradeId, network, token, availableAddress, availableAmount)
+	if err != nil {
+		_ = data.UnLockTransactionByTradeId(parent.TradeId)
+		return nil, err
+	}
+	if !updated {
+		_ = data.UnLockTransactionByTradeId(parent.TradeId)
+		return nil, constant.OrderStatusConflict
+	}
+
+	order, err := data.GetOrderInfoByTradeId(parent.TradeId)
+	if err != nil {
+		return nil, err
+	}
+	return buildCheckoutResponse(order), nil
+}
+
 func buildCheckoutResponse(order *mdb.Orders) *response.CheckoutCounterResponse {
+	paymentType := mdb.PaymentTypeGmpay
+	if strings.EqualFold(order.PaymentType, mdb.PaymentTypeEpay) {
+		paymentType = mdb.PaymentTypeEpay
+	}
 	return &response.CheckoutCounterResponse{
 		TradeId:        order.TradeId,
 		Amount:         order.Amount,
@@ -594,12 +717,91 @@ func buildCheckoutResponse(order *mdb.Orders) *response.CheckoutCounterResponse 
 		Currency:       order.Currency,
 		ReceiveAddress: order.ReceiveAddress,
 		Network:        order.Network,
+		Status:         order.Status,
+		PaymentType:    strings.ToLower(paymentType),
 		ExpirationTime: order.CreatedAt.AddMinutes(config.GetOrderExpirationTime()).TimestampMilli(),
 		RedirectUrl:    order.RedirectUrl,
-		PaymentUrl:     fmt.Sprintf("%s/pay/checkout-counter/%s", config.GetAppUri(), order.TradeId),
 		CreatedAt:      order.CreatedAt.TimestampMilli(),
 		IsSelected:     order.IsSelected,
 	}
+}
+
+func completeWaitSelectOkPayOrder(parent *mdb.Orders, token string) (*response.CheckoutCounterResponse, error) {
+	rate := config.GetRateForCoin(strings.ToLower(token), strings.ToLower(parent.Currency))
+	if rate <= 0 {
+		return nil, constant.RateAmountErr
+	}
+	decimalPayAmount := decimal.NewFromFloat(parent.Amount)
+	decimalTokenAmount := decimalPayAmount.Mul(decimal.NewFromFloat(rate))
+	if decimalTokenAmount.Cmp(decimal.NewFromFloat(UsdtMinimumPaymentAmount)) == -1 {
+		return nil, constant.PayAmountErr
+	}
+
+	amount := math.MustParsePrecFloat64(decimalTokenAmount.InexactFloat64(), data.GetAmountPrecision())
+	returnURL := strings.TrimSpace(parent.RedirectUrl)
+	if returnURL == "" {
+		returnURL = data.GetOkPayReturnURL()
+	}
+	if returnURL == "" {
+		returnURL = fmt.Sprintf("%s/pay/checkout-counter/%s", config.GetAppUri(), parent.TradeId)
+	}
+
+	tx := dao.Mdb.Begin()
+	providerRow := &mdb.ProviderOrder{
+		TradeId:         parent.TradeId,
+		Provider:        mdb.PaymentProviderOkPay,
+		ProviderOrderID: "",
+		PayURL:          "",
+		Amount:          amount,
+		Coin:            token,
+		Status:          mdb.ProviderOrderStatusCreating,
+		NotifyRaw:       "",
+	}
+	if err := data.UpsertProviderOrderCreatingWithTransaction(tx, providerRow); err != nil {
+		tx.Rollback()
+		return nil, err
+	}
+	if err := tx.Commit().Error; err != nil {
+		tx.Rollback()
+		return nil, err
+	}
+
+	okpayOrder, err := createOkPayDepositOrder(parent.TradeId, amount, token, returnURL)
+	if err != nil {
+		_ = data.MarkProviderOrderFailed(parent.TradeId, mdb.PaymentProviderOkPay)
+		return nil, constant.PaymentProviderCreateErr
+	}
+
+	finalizeTx := dao.Mdb.Begin()
+	if err = data.UpdateProviderOrderCreatedWithTransaction(finalizeTx, parent.TradeId, mdb.PaymentProviderOkPay, okpayOrder.ProviderOrderID, okpayOrder.PayURL); err != nil {
+		finalizeTx.Rollback()
+		_ = data.MarkProviderOrderFailed(parent.TradeId, mdb.PaymentProviderOkPay)
+		return nil, err
+	}
+	updated, err := data.CompleteWaitSelectOkPayOrderWithTransaction(finalizeTx, parent.TradeId, token, amount)
+	if err != nil {
+		finalizeTx.Rollback()
+		_ = data.MarkProviderOrderFailed(parent.TradeId, mdb.PaymentProviderOkPay)
+		return nil, err
+	}
+	if !updated {
+		finalizeTx.Rollback()
+		_ = data.MarkProviderOrderFailed(parent.TradeId, mdb.PaymentProviderOkPay)
+		return nil, constant.OrderStatusConflict
+	}
+	if err = finalizeTx.Commit().Error; err != nil {
+		finalizeTx.Rollback()
+		_ = data.MarkProviderOrderFailed(parent.TradeId, mdb.PaymentProviderOkPay)
+		return nil, err
+	}
+
+	order, err := data.GetOrderInfoByTradeId(parent.TradeId)
+	if err != nil {
+		return nil, err
+	}
+	resp := buildCheckoutResponse(order)
+	resp.PaymentUrl = okpayOrder.PayURL
+	return resp, nil
 }
 
 func switchToOkPay(parent *mdb.Orders, token string) (*response.CheckoutCounterResponse, error) {
@@ -611,6 +813,29 @@ func switchToOkPay(parent *mdb.Orders, token string) (*response.CheckoutCounterR
 	}
 	if !okPayTokenAllowed(token) {
 		return nil, constant.PaymentProviderNotSupport
+	}
+
+	if parent.Status == mdb.StatusWaitSelect {
+		return completeWaitSelectOkPayOrder(parent, token)
+	}
+
+	if parent.PayProvider == mdb.PaymentProviderOkPay && strings.EqualFold(parent.Token, token) {
+		providerRow, err := data.GetProviderOrderByTradeIDAndProvider(parent.TradeId, mdb.PaymentProviderOkPay)
+		if err != nil {
+			return nil, err
+		}
+		if providerRow.ID == 0 || strings.TrimSpace(providerRow.PayURL) == "" {
+			return nil, constant.SystemErr
+		}
+		_ = data.MarkOrderSelected(parent.TradeId)
+		_ = data.RefreshOrderExpiration(parent.TradeId)
+		order, err := data.GetOrderInfoByTradeId(parent.TradeId)
+		if err != nil {
+			return nil, err
+		}
+		resp := buildCheckoutResponse(order)
+		resp.PaymentUrl = providerRow.PayURL
+		return resp, nil
 	}
 
 	existing, err := data.GetSubOrderByTokenPayProvider(parent.TradeId, token, mdb.PaymentProviderOkPay)
@@ -625,16 +850,21 @@ func switchToOkPay(parent *mdb.Orders, token string) (*response.CheckoutCounterR
 		if providerRow.ID == 0 || strings.TrimSpace(providerRow.PayURL) == "" {
 			return nil, constant.SystemErr
 		}
-		_ = data.MarkOrderSelected(parent.TradeId)
+		updated, markErr := data.MarkProviderSwitchParentSelectedWithTransaction(dao.Mdb, parent.TradeId)
+		if markErr != nil {
+			return nil, markErr
+		}
+		if !updated {
+			return nil, constant.OrderStatusConflict
+		}
 		_ = data.MarkOrderSelected(existing.TradeId)
-		_ = data.RefreshOrderExpiration(parent.TradeId)
 		existing.IsSelected = true
 		resp := buildCheckoutResponse(existing)
 		resp.PaymentUrl = providerRow.PayURL
 		return resp, nil
 	}
 
-	count, err := data.CountActiveSubOrders(parent.TradeId)
+	count, err := data.CountSubOrders(parent.TradeId)
 	if err != nil {
 		return nil, err
 	}
@@ -711,14 +941,33 @@ func switchToOkPay(parent *mdb.Orders, token string) (*response.CheckoutCounterR
 		_ = data.ExpireOrderByTradeID(subTradeID)
 		return nil, constant.PaymentProviderCreateErr
 	}
-	if err = data.UpdateProviderOrderCreated(subTradeID, mdb.PaymentProviderOkPay, okpayOrder.ProviderOrderID, okpayOrder.PayURL); err != nil {
+
+	finalizeTx := dao.Mdb.Begin()
+	if err = data.UpdateProviderOrderCreatedWithTransaction(finalizeTx, subTradeID, mdb.PaymentProviderOkPay, okpayOrder.ProviderOrderID, okpayOrder.PayURL); err != nil {
+		finalizeTx.Rollback()
 		_ = data.MarkProviderOrderFailed(subTradeID, mdb.PaymentProviderOkPay)
 		_ = data.ExpireOrderByTradeID(subTradeID)
 		return nil, err
 	}
-
-	_ = data.MarkOrderSelected(parent.TradeId)
-	_ = data.RefreshOrderExpiration(parent.TradeId)
+	updated, err := data.MarkProviderSwitchParentSelectedWithTransaction(finalizeTx, parent.TradeId)
+	if err != nil {
+		finalizeTx.Rollback()
+		_ = data.MarkProviderOrderFailed(subTradeID, mdb.PaymentProviderOkPay)
+		_ = data.ExpireOrderByTradeID(subTradeID)
+		return nil, err
+	}
+	if !updated {
+		finalizeTx.Rollback()
+		_ = data.MarkProviderOrderFailed(subTradeID, mdb.PaymentProviderOkPay)
+		_ = data.ExpireOrderByTradeID(subTradeID)
+		return nil, constant.OrderStatusConflict
+	}
+	if err = finalizeTx.Commit().Error; err != nil {
+		finalizeTx.Rollback()
+		_ = data.MarkProviderOrderFailed(subTradeID, mdb.PaymentProviderOkPay)
+		_ = data.ExpireOrderByTradeID(subTradeID)
+		return nil, err
+	}
 
 	resp := buildCheckoutResponse(subOrder)
 	resp.PaymentUrl = okpayOrder.PayURL

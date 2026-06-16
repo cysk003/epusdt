@@ -1,0 +1,1 @@
+import{t as e}from"./forbidden-peSSCojP.js";var t=e;export{t as component};

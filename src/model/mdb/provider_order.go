@@ -9,8 +9,8 @@ const (
 )
 
 // ProviderOrder stores provider-specific checkout data for one internal order
-// row. For OkPay this is expected to bind to the concrete child order created
-// by switch-network, not to the parent merchant order.
+// row. For OkPay this can bind either to a status=4 parent completed in place
+// or to a concrete child order created by later switch-network calls.
 //
 // Binding rules:
 //   - trade_id always points to orders.trade_id

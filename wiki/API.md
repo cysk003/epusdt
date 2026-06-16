@@ -56,6 +56,7 @@
 注意：
 
 - `pid` 必须参与签名。
+- GMPay 的 `payment_type` 不是必填；如果请求里传了非空 `payment_type`，它和其他非空参数一样必须参与签名。
 - 空字符串和 `null` 不参与签名。
 - 参数名区分大小写。
 - JSON 数字会按服务端数字格式参与签名，例如 `100.00` 会被解析为 `100`；如果需要保留字符串格式，可使用 `application/x-www-form-urlencoded`。
@@ -163,14 +164,16 @@ function epaySign(array $params, string $secretKey): string
 | `pid` | string | 是 | 商户 PID，用于查找 API Key，并参与签名。 |
 | `order_id` | string | 是 | 商户订单号，最长 32 字符，不能重复。 |
 | `currency` | string | 是 | 法币币种，如 `cny`、`usd`。 |
-| `token` | string | 是 | 收款币种，如 `usdt`、`trx`、`usdc`、`sol`。 |
-| `network` | string | 是 | 收款网络，如 `tron`、`solana`、`ethereum`、`bsc`、`polygon`、`plasma`。 |
+| `token` | string | 条件必填 | 收款币种，如 `usdt`、`trx`、`usdc`、`sol`。GMPay 可与 `network` 同时省略以创建状态 `4` 占位订单。 |
+| `network` | string | 条件必填 | 收款网络，如 `tron`、`solana`、`ethereum`、`bsc`、`polygon`、`plasma`。GMPay 可与 `token` 同时省略以创建状态 `4` 占位订单。 |
 | `amount` | number | 是 | 法币金额，必须大于 `0.01`。 |
 | `notify_url` | string | 是 | 支付成功异步回调地址。 |
 | `redirect_url` | string | 否 | 支付完成后的同步跳转地址。 |
 | `name` | string | 否 | 商品/订单名称。 |
-| `payment_type` | string | 否 | 兼容字段。普通 GMPay 不需要传；传 `Epay` 会使用 EPay 回调格式，且 PID 必须是数字。 |
+| `payment_type` | string | 否 | GMPay 兼容字段，不要求必须传；如果传了非空值，必须参与 GMPay `signature` 计算。普通 GMPay 不传时后台会存为 `Gmpay`；传 `Epay`（大小写不敏感）会统一存为 `Epay` 并使用 EPay 回调格式，且 PID 必须是数字。 |
 | `signature` | string | 是 | GMPay 签名。 |
+
+`token` 和 `network` 必须同传或同缺。两者同缺时只创建包含 `amount/currency` 的占位订单，状态为 `4`，不会分配钱包、不会计算链上支付金额，也不会锁定交易金额；后续由收银台调用 `/pay/switch-network` 选择具体链和币种或 OkPay。只缺其中一个会返回参数错误。
 
 建议先调用 `/payments/gmpay/v1/config` 获取可用的 `network` 和 `token` 组合。
 
@@ -188,6 +191,7 @@ function epaySign(array $params, string $secretKey): string
     "actual_amount": 14.29,
     "receive_address": "TTestTronAddress001",
     "token": "USDT",
+    "status": 1,
     "expiration_time": 1779530812,
     "payment_url": "https://pay.example.com/pay/checkout-counter/20260523171652123456001"
   },
@@ -204,8 +208,11 @@ function epaySign(array $params, string $secretKey): string
 | `actual_amount` | number | 实际需支付的加密货币数量。 |
 | `receive_address` | string | 收款地址。 |
 | `token` | string | 收款币种。 |
+| `status` | integer | 订单状态。状态 `4` 表示等待用户选择 `token/network`。 |
 | `expiration_time` | integer | 订单过期时间，秒级时间戳。 |
 | `payment_url` | string | 收银台地址。该地址会跳转到前端收银台。 |
+
+状态 `4` 占位订单的 `actual_amount` 为 `0`，`receive_address` 和 `token` 为空；过期任务或后台关闭只会把它改为状态 `3`，不会执行交易金额解锁。第一次成功调用 `/pay/switch-network` 时，如果选择普通链上 `token/network`，同一个父订单会原地补全链上字段并变为状态 `1`，此时才会创建真实交易锁；如果选择 `network=okpay`，同一个父订单会原地变为 OkPay 订单并返回 OkPay 托管支付链接，不创建子订单，也不会分配本系统钱包地址或链上锁。占位父单首次补全后 `is_selected` 仍为 `false`，后续同目标选择才会把父单标记为已选中；如果后续切到其它支付目标，则创建唯一一条子订单。
 
 ## 获取公开支付配置
 
@@ -241,9 +248,9 @@ function epaySign(array $params, string $secretKey): string
       "background_image_url": "https://cdn.example.com/background.png"
     },
     "epay": {
-      "default_token": "usdt",
+      "default_token": "",
       "default_currency": "cny",
-      "default_network": "tron"
+      "default_network": ""
     },
     "okpay": {
       "enabled": false,
@@ -293,6 +300,8 @@ function epaySign(array $params, string $secretKey): string
     "currency": "CNY",
     "receive_address": "TTestTronAddress001",
     "network": "tron",
+    "status": 1,
+    "payment_type": "gmpay",
     "expiration_time": 1779530812000,
     "redirect_url": "https://merchant.example/return",
     "payment_url": "",
@@ -304,6 +313,36 @@ function epaySign(array $params, string $secretKey): string
 ```
 
 注意：该接口的 `expiration_time` 和 `created_at` 是毫秒级时间戳。
+
+如果订单是状态 `4` 占位订单，返回的仍是同一个父订单 `trade_id`，但链上支付字段尚未生成。该状态可能来自 GMPay 空 token/network 创建，也可能来自 EPay submit.php 在请求和数据库默认值都没有完整 token/network 时创建：
+
+```json
+{
+  "status_code": 200,
+  "message": "success",
+  "data": {
+    "trade_id": "20260523171652123456001",
+    "amount": 100,
+    "actual_amount": 0,
+    "token": "",
+    "currency": "CNY",
+    "receive_address": "",
+    "network": "",
+    "status": 4,
+    "payment_type": "gmpay",
+    "expiration_time": 1779530812000,
+    "redirect_url": "https://merchant.example/return",
+    "payment_url": "",
+    "created_at": 1779530212000,
+    "is_selected": false
+  },
+  "request_id": "b1344d70-ff19-4543-b601-37abfb3b3686"
+}
+```
+
+`payment_type` 是归一化后的接入类型：底层订单存储为 `Epay/Gmpay`，该接口转为小写 `epay/gmpay` 返回；`epay` 会走 EPay 回调格式，`gmpay` 走默认 GMPay JSON 回调格式。
+
+前端看到 `status=4` 时，应展示选择网络和币种/支付通道的界面，并在用户选择后调用 `/pay/switch-network`。选择链上支付成功后，该父订单会变为 `status=1`，`actual_amount`、`token`、`network`、`receive_address` 会被补全，但 `is_selected` 保持 `false`，由后续同目标选择流程标记为已选中。选择 OkPay 成功后，接口返回同一个父订单 `trade_id` 和第三方 `payment_url`；父订单会变为 `status=1`、`is_selected=false`、`pay_provider=okpay`、`network=okpay`、`receive_address=OKPAY`。
 
 ## 查询支付状态
 
@@ -330,6 +369,7 @@ function epaySign(array $params, string $secretKey): string
 | `1` | 等待支付 |
 | `2` | 支付成功 |
 | `3` | 已过期 |
+| `4` | 等待选择支付网络/币种 |
 
 ## 切换支付网络/通道
 
@@ -367,13 +407,16 @@ function epaySign(array $params, string $secretKey): string
 
 ### 成功响应
 
-返回结构与收银台初始化数据一致。链上子订单的 `payment_url` 通常是本地收银台地址；OkPay 子订单的 `payment_url` 是 OkPay 返回的托管支付链接。
+返回结构与收银台初始化数据一致。链上订单的 `payment_url` 为空；OkPay 订单的 `payment_url` 是 OkPay 返回的托管支付链接。若父订单仍是 `status=4`，首次切换链上或 OkPay 都会原地补全父订单并返回同一个 `trade_id`。
 
 说明：
 
 - 只能对父订单切换网络，不能对子订单继续切换。
-- 父订单必须仍处于等待支付状态。
-- 每个父订单最多创建 2 个等待支付中的子订单。
+- 父订单必须处于等待支付状态 `1`，或占位状态 `4`。
+- 状态 `4` 第一次选择具体链和币种时，会原地补全父订单并返回同一个 `trade_id`，不会创建子订单。
+- 状态 `4` 第一次选择 `network=okpay` 时，不要求父订单已有链上字段；系统会原地把父订单补成 OkPay 订单并返回同一个 `trade_id` 与 OkPay `payment_url`，不会创建子订单。
+- 状态 `4` 补全后订单变为状态 `1`，但 `is_selected` 保持 `false`；之后同目标选择会返回父单并标记选中，切到其它支付目标才创建子订单。
+- 每个父订单最多创建 1 个子订单；已经创建过子订单后，不能再用该父单创建第二个新子订单。子订单本身不能继续切换网络。
 - 如果切换到同一组 `token + network`，会返回已有订单。
 
 ## EPay 兼容创建交易
@@ -399,6 +442,9 @@ function epaySign(array $params, string $secretKey): string
 | `return_url` | query/form | string | 否 | 支付完成后的同步跳转地址。 |
 | `name` | query/form | string | 否 | 商品/订单名称。 |
 | `type` | query/form | string | 否 | 兼容字段，如 `alipay`。创建订单时不决定实际链上币种。 |
+| `token` | query/form | string | 否 | 可选收款币种。优先级高于后台 `epay.default_token`；传了就必须参与 EPay 签名。 |
+| `network` | query/form | string | 否 | 可选收款网络。优先级高于后台 `epay.default_network`；传了就必须参与 EPay 签名。 |
+| `currency` | query/form | string | 否 | 可选法币币种。优先级高于后台 `epay.default_currency`；传了就必须参与 EPay 签名。 |
 | `sign` | query/form | string | 是 | EPay 签名。 |
 | `sign_type` | query/form | string | 否 | 通常为 `MD5`。 |
 
@@ -420,7 +466,15 @@ money=100&name=VIP&notify_url=https://merchant.example/notify&out_trade_no=ORD20
 sign=b865b0acbb2b01554c35a1bd33351452
 ```
 
-EPay 接口会使用后台配置的默认 `token`、`currency`、`network` 创建实际订单，默认配置可通过 `/payments/gmpay/v1/config` 的 `epay` 字段查看。
+EPay 接口解析 `token/network/currency` 的优先级：
+
+- `token`：请求参数 `token` > 数据库 `epay.default_token` > 空。
+- `network`：请求参数 `network` > 数据库 `epay.default_network` > 空。
+- `currency`：请求参数 `currency` > 数据库 `epay.default_currency` > `cny`。
+- 最终 `token/network` 同时有值时，创建具体链上订单；同时为空时，创建状态 `4` 占位订单；只缺一个时返回参数错误。
+- 服务端会在 EPay 签名校验通过后内部注入 `payment_type=Epay`，该字段不参与 EPay 入站签名；但请求里显式传入的 `token/network/currency` 属于原始 EPay 参数，必须参与签名。
+
+后台默认配置可通过 `/payments/gmpay/v1/config` 的 `epay` 字段查看；新安装默认只预置 `epay.default_currency=cny`，`epay.default_token` 和 `epay.default_network` 为空，因此 EPay 未显式传 token/network 时会创建状态 `4` 占位订单。已有数据库的配置不会被 seed 覆盖，删除或置空 `epay.default_token` 和 `epay.default_network` 后，这两个字段会返回空字符串。
 
 ## 商户异步回调
 
@@ -498,7 +552,7 @@ success
 fail
 ```
 
-Epusdt 会按配置的 OkPay shop token 验证 OkPay 签名，成功后将对应 OkPay 子订单标记为已支付，并触发父订单商户回调。
+Epusdt 会按配置的 OkPay shop token 验证 OkPay 签名，成功后将对应 OkPay 订单标记为已支付，并触发商户回调；这个 OkPay 订单可能是由 `status=4` 占位父单原地补全而来，也可能是后续切换创建的子订单。
 
 ## status_code 返回状态码及含义
 

@@ -1,0 +1,1 @@
+import{t as e}from"./unauthorized-error-CASnS-6J.js";var t=e;export{t as component};

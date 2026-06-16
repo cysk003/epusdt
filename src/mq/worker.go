@@ -48,10 +48,12 @@ const sqliteBusyRetryAttempts = 3
 type expirableOrder struct {
 	ID             uint64  `gorm:"column:id"`
 	TradeId        string  `gorm:"column:trade_id"`
+	Status         int     `gorm:"column:status"`
 	Network        string  `gorm:"column:network"`
 	ReceiveAddress string  `gorm:"column:receive_address"`
 	Token          string  `gorm:"column:token"`
 	ActualAmount   float64 `gorm:"column:actual_amount"`
+	PayProvider    string  `gorm:"column:pay_provider"`
 }
 
 func runOrderExpirationLoop() {
@@ -91,8 +93,8 @@ func processExpiredOrders() {
 		var orders []expirableOrder
 		err := withSQLiteBusyRetry(func() error {
 			return dao.Mdb.Model(&mdb.Orders{}).
-				Select("id", "trade_id", "network", "receive_address", "token", "actual_amount").
-				Where("status = ?", mdb.StatusWaitPay).
+				Select("id", "trade_id", "status", "network", "receive_address", "token", "actual_amount", "pay_provider").
+				Where("status IN ?", []int{mdb.StatusWaitPay, mdb.StatusWaitSelect}).
 				Where("created_at <= ?", expirationCutoff).
 				Order("id asc").
 				Limit(batchSize).
@@ -113,6 +115,17 @@ func processExpiredOrders() {
 				continue
 			}
 			if !expired {
+				continue
+			}
+			// StatusWaitSelect placeholders have not reserved a wallet or
+			// amount yet, so there is no transaction lock to release.
+			if order.Status == mdb.StatusWaitSelect {
+				continue
+			}
+			if strings.TrimSpace(order.PayProvider) != "" && order.PayProvider != mdb.PaymentProviderOnChain {
+				continue
+			}
+			if strings.TrimSpace(order.Network) == "" || strings.TrimSpace(order.ReceiveAddress) == "" || strings.TrimSpace(order.Token) == "" || order.ActualAmount <= 0 {
 				continue
 			}
 			if err = data.UnLockTransaction(order.Network, order.ReceiveAddress, order.Token, order.ActualAmount); err != nil {
@@ -192,8 +205,8 @@ func sendOrderCallback(order *mdb.Orders) error {
 		return errors.New("no api key row available for callback")
 	}
 
-	switch order.PaymentType {
-	case mdb.PaymentTypeEpay:
+	switch {
+	case strings.EqualFold(order.PaymentType, mdb.PaymentTypeEpay):
 		// EPAY uses pid (integer) and secret_key as "key".
 		pidInt, convErr := strconv.Atoi(apiKeyRow.Pid)
 		if convErr != nil {

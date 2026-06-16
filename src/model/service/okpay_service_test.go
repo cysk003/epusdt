@@ -102,6 +102,79 @@ func TestHandleOkPayNotifySendsPaymentNotificationOnSuccess(t *testing.T) {
 	}
 }
 
+func TestHandleOkPayNotifySettlesPlaceholderParent(t *testing.T) {
+	cleanup := testutil.SetupTestDatabases(t)
+	defer cleanup()
+
+	const (
+		shopID          = "okpay-shop-placeholder"
+		shopToken       = "okpay-shop-placeholder-token"
+		parentTradeID   = "okpay-placeholder-parent-001"
+		providerOrderID = "okpay-placeholder-provider-001"
+	)
+
+	if err := data.SetSetting(mdb.SettingGroupOkPay, mdb.SettingKeyOkPayShopID, shopID, mdb.SettingTypeString); err != nil {
+		t.Fatalf("seed okpay shop id: %v", err)
+	}
+	if err := data.SetSetting(mdb.SettingGroupOkPay, mdb.SettingKeyOkPayShopToken, shopToken, mdb.SettingTypeString); err != nil {
+		t.Fatalf("seed okpay shop token: %v", err)
+	}
+
+	parent := &mdb.Orders{
+		TradeId:        parentTradeID,
+		OrderId:        "merchant-okpay-placeholder-parent-001",
+		Amount:         1,
+		Currency:       "CNY",
+		ActualAmount:   0.15,
+		ReceiveAddress: "OKPAY",
+		Token:          "USDT",
+		Network:        mdb.PaymentProviderOkPay,
+		Status:         mdb.StatusWaitPay,
+		IsSelected:     true,
+		PaymentType:    mdb.PaymentTypeGmpay,
+		PayProvider:    mdb.PaymentProviderOkPay,
+	}
+	if err := dao.Mdb.Create(parent).Error; err != nil {
+		t.Fatalf("seed parent order: %v", err)
+	}
+	if err := dao.Mdb.Create(&mdb.ProviderOrder{
+		TradeId:         parentTradeID,
+		Provider:        mdb.PaymentProviderOkPay,
+		ProviderOrderID: providerOrderID,
+		Amount:          0.15,
+		Coin:            "USDT",
+		Status:          mdb.ProviderOrderStatusPending,
+	}).Error; err != nil {
+		t.Fatalf("seed provider order: %v", err)
+	}
+
+	form := okPayNotifyTestForm(shopID, shopToken, providerOrderID, parentTradeID, "0.15000000", "USDT")
+	if err := HandleOkPayNotify(form, "placeholder-okpay-form"); err != nil {
+		t.Fatalf("handle okpay notify: %v", err)
+	}
+
+	reloadedParent, err := data.GetOrderInfoByTradeId(parentTradeID)
+	if err != nil {
+		t.Fatalf("reload parent: %v", err)
+	}
+	if reloadedParent.Status != mdb.StatusPaySuccess {
+		t.Fatalf("parent status = %d, want %d", reloadedParent.Status, mdb.StatusPaySuccess)
+	}
+	if reloadedParent.PayBySubId != 0 {
+		t.Fatalf("parent pay_by_sub_id = %d, want 0", reloadedParent.PayBySubId)
+	}
+	if reloadedParent.Token != "USDT" || reloadedParent.Network != mdb.PaymentProviderOkPay || reloadedParent.ReceiveAddress != "OKPAY" || reloadedParent.ActualAmount != 0.15 {
+		t.Fatalf("okpay parent fields changed: token=%q network=%q address=%q actual=%v", reloadedParent.Token, reloadedParent.Network, reloadedParent.ReceiveAddress, reloadedParent.ActualAmount)
+	}
+	providerRow, err := data.GetProviderOrderByTradeIDAndProvider(parentTradeID, mdb.PaymentProviderOkPay)
+	if err != nil {
+		t.Fatalf("reload provider row: %v", err)
+	}
+	if providerRow.Status != mdb.ProviderOrderStatusPaid {
+		t.Fatalf("provider status = %q, want %q", providerRow.Status, mdb.ProviderOrderStatusPaid)
+	}
+}
+
 func okPayNotifyTestForm(shopID, shopToken, providerOrderID, tradeID, amount, coin string) map[string]string {
 	form := map[string]string{
 		"code":              "200",

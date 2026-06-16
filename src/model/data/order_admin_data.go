@@ -105,12 +105,12 @@ func CountOrdersByStatus() (map[int]int64, error) {
 	return out, nil
 }
 
-// CloseOrderManually transitions a pending order to expired. Only
-// touches rows currently in StatusWaitPay so idempotent / safe.
+// CloseOrderManually transitions a pending order to expired. It covers both
+// payable orders and placeholder orders waiting for token/network selection.
 func CloseOrderManually(tradeID string) (bool, error) {
 	result := dao.Mdb.Model(&mdb.Orders{}).
 		Where("trade_id = ?", tradeID).
-		Where("status = ?", mdb.StatusWaitPay).
+		Where("status IN ?", []int{mdb.StatusWaitPay, mdb.StatusWaitSelect}).
 		Update("status", mdb.StatusExpired)
 	return result.RowsAffected > 0, result.Error
 }

@@ -62,6 +62,21 @@ func TestProcessExpiredOrdersExpiresWaitingOrdersAndReleasesLocks(t *testing.T) 
 		t.Fatalf("lock recent order: %v", err)
 	}
 
+	placeholder := &mdb.Orders{
+		TradeId:   "trade_wait_select_expired",
+		OrderId:   "order_wait_select_expired",
+		Amount:    1,
+		Currency:  "CNY",
+		Status:    mdb.StatusWaitSelect,
+		NotifyUrl: "https://merchant.example/callback",
+	}
+	if err := dao.Mdb.Create(placeholder).Error; err != nil {
+		t.Fatalf("create placeholder order: %v", err)
+	}
+	if err := dao.Mdb.Model(placeholder).UpdateColumn("created_at", time.Now().Add(-20*time.Minute)).Error; err != nil {
+		t.Fatalf("age placeholder order: %v", err)
+	}
+
 	processExpiredOrders()
 
 	expired, err := data.GetOrderInfoByTradeId(order.TradeId)
@@ -92,6 +107,14 @@ func TestProcessExpiredOrdersExpiresWaitingOrdersAndReleasesLocks(t *testing.T) 
 	}
 	if lockTradeID != recentOrder.TradeId {
 		t.Fatalf("recent order lock = %s, want %s", lockTradeID, recentOrder.TradeId)
+	}
+
+	expiredPlaceholder, err := data.GetOrderInfoByTradeId(placeholder.TradeId)
+	if err != nil {
+		t.Fatalf("reload expired placeholder: %v", err)
+	}
+	if expiredPlaceholder.Status != mdb.StatusExpired {
+		t.Fatalf("placeholder status = %d, want %d", expiredPlaceholder.Status, mdb.StatusExpired)
 	}
 }
 
@@ -295,7 +318,7 @@ func TestDispatchPendingCallbacksEpayRequiresAck(t *testing.T) {
 		BlockTransactionId: "block_callback_epay_fail",
 		CallbackNum:        0,
 		CallBackConfirm:    mdb.CallBackConfirmNo,
-		PaymentType:        mdb.PaymentTypeEpay,
+		PaymentType:        "epay",
 		ApiKeyID:           epayKey.ID,
 	}
 	if err := dao.Mdb.Create(order).Error; err != nil {
@@ -349,7 +372,7 @@ func TestDispatchPendingCallbacksEpayAcceptsTrimmedOk(t *testing.T) {
 		BlockTransactionId: "block_callback_epay_ok",
 		CallbackNum:        0,
 		CallBackConfirm:    mdb.CallBackConfirmNo,
-		PaymentType:        mdb.PaymentTypeEpay,
+		PaymentType:        "epay",
 		ApiKeyID:           epayKey.ID,
 	}
 	if err := dao.Mdb.Create(order).Error; err != nil {
@@ -550,7 +573,7 @@ func TestSendOrderCallbackEpayUsesApiKeySecretByPid(t *testing.T) {
 		Status:             mdb.StatusPaySuccess,
 		NotifyUrl:          server.URL,
 		BlockTransactionId: "block_epay_sign",
-		PaymentType:        mdb.PaymentTypeEpay,
+		PaymentType:        "epay",
 		ApiKeyID:           key.ID,
 	}
 

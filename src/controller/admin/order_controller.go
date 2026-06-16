@@ -112,7 +112,7 @@ func (c *BaseAdminController) CloseOrder(ctx echo.Context) error {
 	if order.ID == 0 {
 		return c.FailJson(ctx, constant.OrderNotExists)
 	}
-	if order.Status != mdb.StatusWaitPay {
+	if order.Status != mdb.StatusWaitPay && order.Status != mdb.StatusWaitSelect {
 		return c.FailJson(ctx, constant.OrderNotWaitPay)
 	}
 	ok, err := data.CloseOrderManually(tradeID)
@@ -122,8 +122,16 @@ func (c *BaseAdminController) CloseOrder(ctx echo.Context) error {
 	if !ok {
 		return c.FailJson(ctx, constant.OrderStatusConflict)
 	}
-	// Release the transaction lock so the amount slot becomes reusable.
-	_ = data.UnLockTransaction(order.Network, order.ReceiveAddress, order.Token, order.ActualAmount)
+	// Release only concrete on-chain locks. Placeholder orders and provider-only
+	// orders do not reserve a local wallet amount.
+	if order.Status == mdb.StatusWaitPay &&
+		(strings.TrimSpace(order.PayProvider) == "" || order.PayProvider == mdb.PaymentProviderOnChain) &&
+		strings.TrimSpace(order.Network) != "" &&
+		strings.TrimSpace(order.ReceiveAddress) != "" &&
+		strings.TrimSpace(order.Token) != "" &&
+		order.ActualAmount > 0 {
+		_ = data.UnLockTransaction(order.Network, order.ReceiveAddress, order.Token, order.ActualAmount)
+	}
 	return c.SucJson(ctx, nil)
 }
 

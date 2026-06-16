@@ -763,6 +763,34 @@ func TestAdminOrders_CloseNotFound(t *testing.T) {
 	}
 }
 
+func TestAdminOrders_CloseWaitSelectOrder(t *testing.T) {
+	e, token := setupAdminTestEnv(t)
+	order := &mdb.Orders{
+		TradeId:     "trade-admin-close-wait-select",
+		OrderId:     "order-admin-close-wait-select",
+		Amount:      10,
+		Currency:    "CNY",
+		Status:      mdb.StatusWaitSelect,
+		NotifyUrl:   "https://merchant.example/notify",
+		PayProvider: mdb.PaymentProviderOnChain,
+	}
+	if err := dao.Mdb.Create(order).Error; err != nil {
+		t.Fatalf("create wait-select order: %v", err)
+	}
+
+	rec := doPostAdmin(e, "/admin/api/v1/orders/"+order.TradeId+"/close", nil, token)
+	t.Logf("CloseOrder wait-select: status=%d body=%s", rec.Code, rec.Body.String())
+	assertOK(t, rec)
+
+	reloaded, err := data.GetOrderInfoByTradeId(order.TradeId)
+	if err != nil {
+		t.Fatalf("reload order: %v", err)
+	}
+	if reloaded.Status != mdb.StatusExpired {
+		t.Fatalf("status = %d, want %d", reloaded.Status, mdb.StatusExpired)
+	}
+}
+
 // TestAdminOrders_MarkPaidNotFound verifies mark-paid on non-existent order.
 func TestAdminOrders_MarkPaidNotFound(t *testing.T) {
 	e, token := setupAdminTestEnv(t)

@@ -95,6 +95,63 @@ func TestSeedDefaultSettingsIncludesSystemLogLevel(t *testing.T) {
 	}
 }
 
+func TestSeedDefaultSettingsUsesEmptyEpayTokenAndNetwork(t *testing.T) {
+	db := setupSeedSettingsTestDB(t)
+	Mdb = db
+
+	seedDefaultSettings()
+
+	rows := make(map[string]mdb.Setting)
+	for _, key := range []string{
+		mdb.SettingKeyEpayDefaultToken,
+		mdb.SettingKeyEpayDefaultCurrency,
+		mdb.SettingKeyEpayDefaultNetwork,
+	} {
+		var row mdb.Setting
+		if err := Mdb.Where("`key` = ?", key).Take(&row).Error; err != nil {
+			t.Fatalf("load %s seed: %v", key, err)
+		}
+		rows[key] = row
+	}
+	if rows[mdb.SettingKeyEpayDefaultToken].Value != "" {
+		t.Fatalf("epay.default_token seed = %q, want empty", rows[mdb.SettingKeyEpayDefaultToken].Value)
+	}
+	if rows[mdb.SettingKeyEpayDefaultNetwork].Value != "" {
+		t.Fatalf("epay.default_network seed = %q, want empty", rows[mdb.SettingKeyEpayDefaultNetwork].Value)
+	}
+	if rows[mdb.SettingKeyEpayDefaultCurrency].Value != "cny" {
+		t.Fatalf("epay.default_currency seed = %q, want cny", rows[mdb.SettingKeyEpayDefaultCurrency].Value)
+	}
+}
+
+func TestSeedDefaultSettingsDoesNotOverwriteExistingEpayDefaults(t *testing.T) {
+	db := setupSeedSettingsTestDB(t)
+	Mdb = db
+	for _, row := range []mdb.Setting{
+		{Group: mdb.SettingGroupEpay, Key: mdb.SettingKeyEpayDefaultToken, Value: "usdt", Type: mdb.SettingTypeString},
+		{Group: mdb.SettingGroupEpay, Key: mdb.SettingKeyEpayDefaultNetwork, Value: "tron", Type: mdb.SettingTypeString},
+	} {
+		if err := Mdb.Create(&row).Error; err != nil {
+			t.Fatalf("precreate %s: %v", row.Key, err)
+		}
+	}
+
+	seedDefaultSettings()
+
+	for key, want := range map[string]string{
+		mdb.SettingKeyEpayDefaultToken:   "usdt",
+		mdb.SettingKeyEpayDefaultNetwork: "tron",
+	} {
+		var row mdb.Setting
+		if err := Mdb.Where("`key` = ?", key).Take(&row).Error; err != nil {
+			t.Fatalf("load %s seed: %v", key, err)
+		}
+		if row.Value != want {
+			t.Fatalf("%s value = %q, want existing %q", key, row.Value, want)
+		}
+	}
+}
+
 func TestSeedDefaultSettingsDoesNotOverwriteSystemLogLevel(t *testing.T) {
 	db := setupSeedSettingsTestDB(t)
 	Mdb = db

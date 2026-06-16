@@ -8,6 +8,7 @@ import (
 	"io"
 	"net/http"
 	"strconv"
+	"strings"
 
 	"github.com/GMWalletApp/epusdt/controller/admin"
 	"github.com/GMWalletApp/epusdt/controller/comm"
@@ -43,7 +44,9 @@ func RegisterRoute(e *echo.Echo) {
 	// payment routes
 	paymentRoute := e.Group("/payments")
 
-	// gmpay v1 routes
+	// gmpay v1 routes. CreateTransaction accepts token+network together
+	// for a concrete chain order, or omits both for a status=4 placeholder
+	// that is completed later by /pay/switch-network or routed to OkPay.
 	gmpayV1 := paymentRoute.Group("/gmpay/v1")
 	gmpayV1.POST("/order/create-transaction", comm.Ctrl.CreateTransaction, middleware.CheckApiSign())
 	gmpayV1.GET("/config", comm.Ctrl.GetPublicConfig)
@@ -129,6 +132,21 @@ func RegisterRoute(e *echo.Echo) {
 		notifyURL := getString(params, "notify_url")
 		outTradeNo := getString(params, "out_trade_no")
 		returnURL := getString(params, "return_url")
+		token := strings.TrimSpace(getString(params, "token"))
+		if token == "" {
+			token = data.GetSettingString(mdb.SettingKeyEpayDefaultToken, "")
+		}
+		network := strings.TrimSpace(getString(params, "network"))
+		if network == "" {
+			network = data.GetSettingString(mdb.SettingKeyEpayDefaultNetwork, "")
+		}
+		currency := strings.TrimSpace(getString(params, "currency"))
+		if currency == "" {
+			currency = data.GetSettingString(mdb.SettingKeyEpayDefaultCurrency, "")
+		}
+		if currency == "" {
+			currency = "cny"
+		}
 
 		amountFloat, err := strconv.ParseFloat(money, 64)
 		if err != nil {
@@ -136,9 +154,9 @@ func RegisterRoute(e *echo.Echo) {
 		}
 
 		body := map[string]interface{}{
-			"token":        data.GetSettingString(mdb.SettingKeyEpayDefaultToken, "usdt"),
-			"currency":     data.GetSettingString(mdb.SettingKeyEpayDefaultCurrency, "cny"),
-			"network":      data.GetSettingString(mdb.SettingKeyEpayDefaultNetwork, "tron"),
+			"token":        token,
+			"currency":     currency,
+			"network":      network,
 			"amount":       amountFloat,
 			"notify_url":   notifyURL,
 			"order_id":     outTradeNo,

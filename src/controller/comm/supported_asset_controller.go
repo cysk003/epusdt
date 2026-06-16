@@ -109,9 +109,9 @@ func (c *BaseCommController) GetPublicConfig(ctx echo.Context) error {
 			BackgroundImageURL: data.GetBrandBackgroundImageURL(),
 		},
 		Epay: response.EpayPublicConfig{
-			DefaultToken:    data.GetSettingString(mdb.SettingKeyEpayDefaultToken, "usdt"),
+			DefaultToken:    data.GetSettingString(mdb.SettingKeyEpayDefaultToken, ""),
 			DefaultCurrency: data.GetSettingString(mdb.SettingKeyEpayDefaultCurrency, "cny"),
-			DefaultNetwork:  data.GetSettingString(mdb.SettingKeyEpayDefaultNetwork, "tron"),
+			DefaultNetwork:  data.GetSettingString(mdb.SettingKeyEpayDefaultNetwork, ""),
 		},
 		OkPay:   okpay,
 		Version: config.GetAppVersion(),

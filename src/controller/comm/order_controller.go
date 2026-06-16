@@ -25,6 +25,8 @@ func apiKeyFromContext(ctx echo.Context) *mdb.ApiKey {
 // CreateTransaction 创建交易
 // @Summary      Create transaction
 // @Description  Create a payment transaction order. Accepts JSON body (application/json) or form-encoded body (application/x-www-form-urlencoded).
+// @Description  GMPay may omit both token and network to create a status=4 placeholder order; EPay submit.php can also create one when neither request parameters nor database defaults provide token/network. Supplying only one of token/network is invalid.
+// @Description  payment_type is optional for GMPay. If it is sent, it is a normal signed parameter and must be included when calculating signature.
 // @Tags         Payment
 // @Accept       json
 // @Accept       x-www-form-urlencoded
@@ -32,14 +34,14 @@ func apiKeyFromContext(ctx echo.Context) *mdb.ApiKey {
 // @Param        request body request.CreateTransactionRequest false "Transaction payload (JSON)"
 // @Param        order_id formData string false "Merchant order ID"
 // @Param        currency formData string false "Fiat currency (e.g. cny)"
-// @Param        token formData string false "Crypto token (e.g. TON, USDT)"
-// @Param        network formData string false "Network (e.g. ton, tron)"
+// @Param        token formData string false "Crypto token (e.g. TON, USDT); omit together with network to create a placeholder where supported"
+// @Param        network formData string false "Network (e.g. ton, tron); omit together with token to create a placeholder where supported"
 // @Param        amount formData number false "Amount"
 // @Param        notify_url formData string false "Callback URL"
 // @Param        signature formData string false "MD5 signature"
 // @Param        redirect_url formData string false "Redirect URL"
 // @Param        name formData string false "Order name"
-// @Param        payment_type formData string false "Payment type"
+// @Param        payment_type formData string false "Optional GMPay compatibility flag; include in signature when sent"
 // @Success      200 {object} response.ApiResponse{data=response.CreateTransactionResponse}
 // @Failure      400 {object} response.ApiResponse "Stable errno in status_code: 10009 invalid params, 10041 invalid notify_url, 10004 invalid amount, 10014 chain disabled, 10016 unsupported asset, 10003 no wallet, 10005 no amount channel"
 // @Router       /payments/gmpay/v1/order/create-transaction [post]
@@ -58,17 +60,17 @@ func (c *BaseCommController) CreateTransaction(ctx echo.Context) (err error) {
 	return c.SucJson(ctx, resp)
 }
 
-// SwitchNetwork 切换支付网络，创建或返回子订单
+// SwitchNetwork 切换支付网络，补全占位父单或创建/返回子订单
 // @Summary      Switch payment network
-// @Description  Switch to a different payment target, creating or returning a sub-order.
-// @Description  Normal values such as ton/tron/solana/ethereum create on-chain child orders.
-// @Description  The special value okpay creates or reuses an OkPay-hosted child order and returns its payment_url.
+// @Description  Switch to a different payment target. A status=4 placeholder is completed in place and returns the same parent trade_id with is_selected=false; an already concrete status=1 parent creates or returns the only sub-order when switching to a different target.
+// @Description  Normal values such as ton/tron/solana/ethereum select on-chain payment; the special value okpay selects OkPay hosted payment.
+// @Description  For status=4 placeholders from GMPay or EPay submit.php, both on-chain targets and okpay complete the parent in place without creating a child order. Sub-orders cannot be switched again.
 // @Tags         Payment
 // @Accept       json
 // @Produce      json
 // @Param        request body request.SwitchNetworkRequest true "Switch network payload"
 // @Success      200 {object} response.ApiResponse{data=response.CheckoutCounterResponse}
-// @Failure      400 {object} response.ApiResponse "Stable errno in status_code: 10008 order not found, 10012 cannot switch sub-order, 10013 not waiting payment, 10016 unsupported asset, 10017/10018/10019 provider errors, 10042 provider order creation failed"
+// @Failure      400 {object} response.ApiResponse "Stable errno in status_code: 10008 order not found, 10011 sub-order limit, 10012 cannot switch sub-order, 10013 not waiting payment, 10016 unsupported asset, 10017/10018/10019 provider errors, 10042 provider order creation failed"
 // @Router       /pay/switch-network [post]
 func (c *BaseCommController) SwitchNetwork(ctx echo.Context) (err error) {
 	req := new(request.SwitchNetworkRequest)
@@ -98,7 +100,7 @@ func (c *BaseCommController) SwitchNetwork(ctx echo.Context) (err error) {
 // POST (form) per the legacy EPAY protocol; swagger documents POST as
 // the canonical form — the GET variant is identical save the transport.
 // @Summary      Create transaction and redirect (EPAY compat)
-// @Description  Legacy EPAY-style endpoint. Accepts GET (querystring) and POST (form). On success, 302 redirects to /pay/checkout-counter/{trade_id}. Signature uses MD5 of sorted params + secret_key of the api_keys row matching the submitted pid.
+// @Description  Legacy EPAY-style endpoint. Accepts GET (querystring) and POST (form). On success, 302 redirects to /pay/checkout-counter/{trade_id}. Signature uses MD5 of sorted params + secret_key of the api_keys row matching the submitted pid. Optional request token/network/currency override database defaults and must be included in the EPay signature when sent. The server injects internal payment_type=Epay after EPay signature verification; merchants do not send GMPay payment_type to this endpoint.
 // @Tags         Payment
 // @Accept       x-www-form-urlencoded
 // @Produce      html

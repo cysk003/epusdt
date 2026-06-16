@@ -87,6 +87,85 @@ func TestCreateTransactionRejectsPrivateNotifyURL(t *testing.T) {
 	}
 }
 
+func TestCreateTransactionCreatesWaitSelectPlaceholderWithoutTokenNetwork(t *testing.T) {
+	cleanup := testutil.SetupTestDatabases(t)
+	defer cleanup()
+
+	req := newCreateTransactionRequest("order_wait_select_1", 12.34)
+	req.Token = ""
+	req.Network = ""
+	resp, err := CreateTransaction(req, nil)
+	if err != nil {
+		t.Fatalf("create placeholder transaction: %v", err)
+	}
+	if resp.Status != mdb.StatusWaitSelect {
+		t.Fatalf("response status = %d, want %d", resp.Status, mdb.StatusWaitSelect)
+	}
+	if resp.Token != "" || resp.ReceiveAddress != "" || resp.ActualAmount != 0 {
+		t.Fatalf("placeholder chain fields = token %q address %q actual %.4f", resp.Token, resp.ReceiveAddress, resp.ActualAmount)
+	}
+
+	order, err := data.GetOrderInfoByTradeId(resp.TradeId)
+	if err != nil {
+		t.Fatalf("reload placeholder order: %v", err)
+	}
+	if order.Status != mdb.StatusWaitSelect {
+		t.Fatalf("order status = %d, want %d", order.Status, mdb.StatusWaitSelect)
+	}
+	if order.PaymentType != mdb.PaymentTypeGmpay {
+		t.Fatalf("placeholder payment_type = %q, want %q", order.PaymentType, mdb.PaymentTypeGmpay)
+	}
+	if order.Token != "" || order.Network != "" || order.ReceiveAddress != "" || order.ActualAmount != 0 {
+		t.Fatalf("placeholder order has chain fields: %+v", order)
+	}
+
+	var locks int64
+	if err := dao.RuntimeDB.Model(&mdb.TransactionLock{}).Where("trade_id = ?", resp.TradeId).Count(&locks).Error; err != nil {
+		t.Fatalf("count transaction locks: %v", err)
+	}
+	if locks != 0 {
+		t.Fatalf("placeholder lock count = %d, want 0", locks)
+	}
+}
+
+func TestCreateTransactionRejectsPartialTokenNetwork(t *testing.T) {
+	cleanup := testutil.SetupTestDatabases(t)
+	defer cleanup()
+
+	req := newCreateTransactionRequest("order_partial_token_network_1", 1)
+	req.Token = ""
+	if _, err := CreateTransaction(req, nil); err != constant.ParamsMarshalErr {
+		t.Fatalf("missing token error = %v, want %v", err, constant.ParamsMarshalErr)
+	}
+
+	req = newCreateTransactionRequest("order_partial_token_network_2", 1)
+	req.Network = ""
+	if _, err := CreateTransaction(req, nil); err != constant.ParamsMarshalErr {
+		t.Fatalf("missing network error = %v, want %v", err, constant.ParamsMarshalErr)
+	}
+}
+
+func TestCreateTransactionNormalizesEpayPaymentTypeCase(t *testing.T) {
+	cleanup := testutil.SetupTestDatabases(t)
+	defer cleanup()
+
+	req := newCreateTransactionRequest("order_epay_payment_type_1", 1)
+	req.Token = ""
+	req.Network = ""
+	req.PaymentType = "epay"
+	resp, err := CreateTransaction(req, nil)
+	if err != nil {
+		t.Fatalf("create epay-compatible transaction: %v", err)
+	}
+	order, err := data.GetOrderInfoByTradeId(resp.TradeId)
+	if err != nil {
+		t.Fatalf("reload order: %v", err)
+	}
+	if order.PaymentType != mdb.PaymentTypeEpay {
+		t.Fatalf("payment_type = %q, want %q", order.PaymentType, mdb.PaymentTypeEpay)
+	}
+}
+
 func TestCreateTransactionAssignsIncrementedAmountsAndLocks(t *testing.T) {
 	cleanup := testutil.SetupTestDatabases(t)
 	defer cleanup()
@@ -456,6 +535,146 @@ func TestSwitchNetworkCreatesTonSubOrderAndRawLock(t *testing.T) {
 	}
 	if tradeID != subResp.TradeId {
 		t.Fatalf("TON sub-order lock trade_id = %q, want %q", tradeID, subResp.TradeId)
+	}
+}
+
+func TestSwitchNetworkCompletesWaitSelectPlaceholderInPlace(t *testing.T) {
+	cleanup := testutil.SetupTestDatabases(t)
+	defer cleanup()
+
+	if err := data.SetSetting("rate", "rate.forced_rate_list", `{"cny":{"usdt":0.1}}`, "json"); err != nil {
+		t.Fatalf("set forced rate: %v", err)
+	}
+	if _, err := data.AddWalletAddress("TWaitSelectAddress001"); err != nil {
+		t.Fatalf("add tron wallet: %v", err)
+	}
+
+	req := newCreateTransactionRequest("order_wait_select_switch_1", 10)
+	req.Token = ""
+	req.Network = ""
+	parentResp, err := CreateTransaction(req, nil)
+	if err != nil {
+		t.Fatalf("create placeholder: %v", err)
+	}
+	if parentResp.Status != mdb.StatusWaitSelect {
+		t.Fatalf("parent response status = %d, want %d", parentResp.Status, mdb.StatusWaitSelect)
+	}
+
+	switched, err := SwitchNetwork(&request.SwitchNetworkRequest{
+		TradeId: parentResp.TradeId,
+		Token:   "USDT",
+		Network: mdb.NetworkTron,
+	})
+	if err != nil {
+		t.Fatalf("switch placeholder to tron/usdt: %v", err)
+	}
+	if switched.TradeId != parentResp.TradeId {
+		t.Fatalf("switch returned trade_id = %q, want parent %q", switched.TradeId, parentResp.TradeId)
+	}
+	if switched.Status != mdb.StatusWaitPay {
+		t.Fatalf("switch status = %d, want %d", switched.Status, mdb.StatusWaitPay)
+	}
+	if switched.IsSelected {
+		t.Fatal("switch is_selected = true, want false")
+	}
+	if switched.PaymentUrl != "" {
+		t.Fatalf("switch payment_url = %q, want empty for unselected chain parent", switched.PaymentUrl)
+	}
+	if switched.Token != "USDT" || switched.Network != mdb.NetworkTron || switched.ReceiveAddress != "TWaitSelectAddress001" {
+		t.Fatalf("switch chain fields = token %q network %q address %q", switched.Token, switched.Network, switched.ReceiveAddress)
+	}
+	if got := fmt.Sprintf("%.2f", switched.ActualAmount); got != "1.00" {
+		t.Fatalf("switch actual amount = %s, want 1.00", got)
+	}
+
+	parent, err := data.GetOrderInfoByTradeId(parentResp.TradeId)
+	if err != nil {
+		t.Fatalf("reload parent: %v", err)
+	}
+	if parent.Status != mdb.StatusWaitPay || parent.ParentTradeId != "" {
+		t.Fatalf("parent status/parent_trade_id = %d/%q", parent.Status, parent.ParentTradeId)
+	}
+	if parent.IsSelected {
+		t.Fatal("parent is_selected = true, want false")
+	}
+	if parent.PaymentType != mdb.PaymentTypeGmpay {
+		t.Fatalf("parent payment_type = %q, want %q", parent.PaymentType, mdb.PaymentTypeGmpay)
+	}
+	count, err := data.CountActiveSubOrders(parent.TradeId)
+	if err != nil {
+		t.Fatalf("count sub orders: %v", err)
+	}
+	if count != 0 {
+		t.Fatalf("active sub-order count = %d, want 0", count)
+	}
+	lockTradeID, err := data.GetTradeIdByWalletAddressAndAmountAndToken(mdb.NetworkTron, parent.ReceiveAddress, parent.Token, parent.ActualAmount)
+	if err != nil {
+		t.Fatalf("lookup parent lock: %v", err)
+	}
+	if lockTradeID != parent.TradeId {
+		t.Fatalf("parent lock trade_id = %q, want %q", lockTradeID, parent.TradeId)
+	}
+}
+
+func TestSwitchNetworkAfterWaitSelectCompletionUsesExistingSubOrderFlow(t *testing.T) {
+	cleanup := testutil.SetupTestDatabases(t)
+	defer cleanup()
+
+	if err := data.SetSetting("rate", "rate.forced_rate_list", `{"cny":{"usdt":0.1}}`, "json"); err != nil {
+		t.Fatalf("set forced rate: %v", err)
+	}
+	if _, err := data.AddWalletAddress("TWaitSelectAddress002"); err != nil {
+		t.Fatalf("add tron wallet: %v", err)
+	}
+	if _, err := data.AddWalletAddressWithNetwork(mdb.NetworkEthereum, "0xA1B2c3D4e5F60718293aBcDeF001122334455668"); err != nil {
+		t.Fatalf("add ethereum wallet: %v", err)
+	}
+
+	req := newCreateTransactionRequest("order_wait_select_reswitch_1", 10)
+	req.Token = ""
+	req.Network = ""
+	parentResp, err := CreateTransaction(req, nil)
+	if err != nil {
+		t.Fatalf("create placeholder: %v", err)
+	}
+	first, err := SwitchNetwork(&request.SwitchNetworkRequest{
+		TradeId: parentResp.TradeId,
+		Token:   "USDT",
+		Network: mdb.NetworkTron,
+	})
+	if err != nil {
+		t.Fatalf("first switch: %v", err)
+	}
+
+	second, err := SwitchNetwork(&request.SwitchNetworkRequest{
+		TradeId: parentResp.TradeId,
+		Token:   "USDT",
+		Network: mdb.NetworkEthereum,
+	})
+	if err != nil {
+		t.Fatalf("second switch: %v", err)
+	}
+	if second.TradeId == first.TradeId {
+		t.Fatalf("second switch trade_id = parent %q, want sub-order", second.TradeId)
+	}
+	if second.Network != mdb.NetworkEthereum || second.Token != "USDT" {
+		t.Fatalf("second switch token/network = %s/%s", second.Token, second.Network)
+	}
+	count, err := data.CountActiveSubOrders(parentResp.TradeId)
+	if err != nil {
+		t.Fatalf("count active sub orders: %v", err)
+	}
+	if count != 1 {
+		t.Fatalf("active sub-order count = %d, want 1", count)
+	}
+
+	_, err = SwitchNetwork(&request.SwitchNetworkRequest{
+		TradeId: parentResp.TradeId,
+		Token:   "USDT",
+		Network: mdb.NetworkBsc,
+	})
+	if err != constant.SubOrderLimitExceeded {
+		t.Fatalf("third switch error = %v, want %v", err, constant.SubOrderLimitExceeded)
 	}
 }
 
@@ -1219,7 +1438,6 @@ func TestOrderProcessingSubOrderExpiresSiblingsAndReleasesLocks(t *testing.T) {
 		t.Fatalf("create parent order: %v", err)
 	}
 
-	// Create two sub-orders on different networks.
 	subEthResp, err := SwitchNetwork(&request.SwitchNetworkRequest{
 		TradeId: parentResp.TradeId,
 		Token:   "usdt",
@@ -1229,13 +1447,29 @@ func TestOrderProcessingSubOrderExpiresSiblingsAndReleasesLocks(t *testing.T) {
 		t.Fatalf("switch to ethereum sub-order: %v", err)
 	}
 
-	subBscResp, err := SwitchNetwork(&request.SwitchNetworkRequest{
-		TradeId: parentResp.TradeId,
-		Token:   "usdt",
-		Network: mdb.NetworkBsc,
-	})
-	if err != nil {
-		t.Fatalf("switch to bsc sub-order: %v", err)
+	bscTradeID := GenerateCode()
+	bscAddress := strings.ToLower("0xBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB")
+	subBsc := &mdb.Orders{
+		TradeId:         bscTradeID,
+		OrderId:         bscTradeID,
+		ParentTradeId:   parentResp.TradeId,
+		Amount:          parentResp.Amount,
+		Currency:        parentResp.Currency,
+		ActualAmount:    subEthResp.ActualAmount,
+		ReceiveAddress:  bscAddress,
+		Token:           "USDT",
+		Network:         mdb.NetworkBsc,
+		Status:          mdb.StatusWaitPay,
+		IsSelected:      true,
+		CallBackConfirm: mdb.CallBackConfirmOk,
+		PaymentType:     mdb.PaymentTypeGmpay,
+		PayProvider:     mdb.PaymentProviderOnChain,
+	}
+	if err := dao.Mdb.Create(subBsc).Error; err != nil {
+		t.Fatalf("seed bsc sibling sub-order: %v", err)
+	}
+	if err := data.LockTransaction(mdb.NetworkBsc, bscAddress, "USDT", bscTradeID, subBsc.ActualAmount, time.Hour); err != nil {
+		t.Fatalf("lock bsc sibling amount: %v", err)
 	}
 
 	// Pay the Ethereum sub-order.
@@ -1252,12 +1486,12 @@ func TestOrderProcessingSubOrderExpiresSiblingsAndReleasesLocks(t *testing.T) {
 	}
 
 	// BSC sibling must be expired.
-	subBsc, err := data.GetOrderInfoByTradeId(subBscResp.TradeId)
+	reloadedBsc, err := data.GetOrderInfoByTradeId(subBsc.TradeId)
 	if err != nil {
 		t.Fatalf("reload bsc sub-order: %v", err)
 	}
-	if subBsc.Status != mdb.StatusExpired {
-		t.Fatalf("bsc sibling status = %d, want %d (expired)", subBsc.Status, mdb.StatusExpired)
+	if reloadedBsc.Status != mdb.StatusExpired {
+		t.Fatalf("bsc sibling status = %d, want %d (expired)", reloadedBsc.Status, mdb.StatusExpired)
 	}
 
 	// Parent runtime lock must be released.
@@ -1272,7 +1506,7 @@ func TestOrderProcessingSubOrderExpiresSiblingsAndReleasesLocks(t *testing.T) {
 
 	// BSC sibling runtime lock must be released.
 	sibLock, err := data.GetTradeIdByWalletAddressAndAmountAndToken(
-		mdb.NetworkBsc, subBscResp.ReceiveAddress, subBscResp.Token, subBscResp.ActualAmount)
+		mdb.NetworkBsc, subBsc.ReceiveAddress, subBsc.Token, subBsc.ActualAmount)
 	if err != nil {
 		t.Fatalf("check bsc sibling runtime lock: %v", err)
 	}

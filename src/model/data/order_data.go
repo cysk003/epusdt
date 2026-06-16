@@ -209,7 +209,7 @@ func SaveCallBackOrdersResp(order *mdb.Orders) error {
 func UpdateOrderIsExpirationById(id uint64, expirationCutoff time.Time) (bool, error) {
 	result := dao.Mdb.Model(mdb.Orders{}).
 		Where("id = ?", id).
-		Where("status = ?", mdb.StatusWaitPay).
+		Where("status IN ?", []int{mdb.StatusWaitPay, mdb.StatusWaitSelect}).
 		Where("created_at <= ?", expirationCutoff).
 		Update("status", mdb.StatusExpired)
 	return result.RowsAffected > 0, result.Error
@@ -221,6 +221,15 @@ func CountActiveSubOrders(parentTradeId string) (int64, error) {
 	err := dao.Mdb.Model(&mdb.Orders{}).
 		Where("parent_trade_id = ?", parentTradeId).
 		Where("status = ?", mdb.StatusWaitPay).
+		Count(&count).Error
+	return count, err
+}
+
+// CountSubOrders counts all sub-orders ever created under a parent.
+func CountSubOrders(parentTradeId string) (int64, error) {
+	var count int64
+	err := dao.Mdb.Model(&mdb.Orders{}).
+		Where("parent_trade_id = ?", parentTradeId).
 		Count(&count).Error
 	return count, err
 }
@@ -286,6 +295,61 @@ func MarkOrderSelected(tradeId string) error {
 	return dao.Mdb.Model(&mdb.Orders{}).
 		Where("trade_id = ?", tradeId).
 		Update("is_selected", true).Error
+}
+
+// CompleteWaitSelectOrder fills a placeholder order with concrete chain fields
+// and makes it payable. It only updates status=WaitSelect rows so concurrent
+// switch-network attempts cannot overwrite a payable order.
+func CompleteWaitSelectOrder(tradeID string, network string, token string, receiveAddress string, actualAmount float64) (bool, error) {
+	result := dao.Mdb.Model(&mdb.Orders{}).
+		Where("trade_id = ?", tradeID).
+		Where("status = ?", mdb.StatusWaitSelect).
+		Updates(map[string]interface{}{
+			"status":          mdb.StatusWaitPay,
+			"network":         strings.ToLower(strings.TrimSpace(network)),
+			"token":           strings.ToUpper(strings.TrimSpace(token)),
+			"receive_address": receiveAddress,
+			"actual_amount":   actualAmount,
+			"is_selected":     false,
+			"created_at":      time.Now(),
+		})
+	return result.RowsAffected > 0, result.Error
+}
+
+// CompleteWaitSelectOkPayOrderWithTransaction converts a placeholder parent
+// directly into an OkPay order. It intentionally does not create a local chain
+// lock because OkPay owns the hosted payment target.
+func CompleteWaitSelectOkPayOrderWithTransaction(tx *gorm.DB, tradeID string, token string, actualAmount float64) (bool, error) {
+	result := tx.Model(&mdb.Orders{}).
+		Where("trade_id = ?", tradeID).
+		Where("status = ?", mdb.StatusWaitSelect).
+		Updates(map[string]interface{}{
+			"status":          mdb.StatusWaitPay,
+			"network":         mdb.PaymentProviderOkPay,
+			"token":           strings.ToUpper(strings.TrimSpace(token)),
+			"receive_address": "OKPAY",
+			"actual_amount":   actualAmount,
+			"is_selected":     false,
+			"pay_provider":    mdb.PaymentProviderOkPay,
+			"created_at":      time.Now(),
+		})
+	return result.RowsAffected > 0, result.Error
+}
+
+// MarkProviderSwitchParentSelectedWithTransaction marks a switch-network parent
+// as selected for a hosted payment provider. It intentionally does not fill
+// chain fields or create a transaction lock; the provider child order carries
+// the concrete payment target.
+func MarkProviderSwitchParentSelectedWithTransaction(tx *gorm.DB, tradeID string) (bool, error) {
+	result := tx.Model(&mdb.Orders{}).
+		Where("trade_id = ?", tradeID).
+		Where("status IN ?", []int{mdb.StatusWaitPay, mdb.StatusWaitSelect}).
+		Updates(map[string]interface{}{
+			"status":      mdb.StatusWaitPay,
+			"is_selected": true,
+			"created_at":  time.Now(),
+		})
+	return result.RowsAffected > 0, result.Error
 }
 
 // ExpireOrderByTradeID marks a waiting order as expired. Used to retire failed

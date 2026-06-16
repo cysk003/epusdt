@@ -6,14 +6,18 @@ import "github.com/gookit/validate"
 type CreateTransactionRequest struct {
 	OrderId     string  `json:"order_id" form:"order_id" validate:"required|maxLen:32" example:"ORD20260416001"`
 	Currency    string  `json:"currency" form:"currency" validate:"required" example:"cny"` // 法币 如：cny
-	Token       string  `json:"token" form:"token" validate:"required" example:"usdt"`      // 币种 如：usdt、ton
-	Network     string  `json:"network" form:"network" validate:"required" example:"tron"`  // 网络 如：ton、tron
+	Token       string  `json:"token" form:"token" example:"usdt"`                          // 币种 如：usdt、ton；可与 network 同时缺省创建占位订单
+	Network     string  `json:"network" form:"network" example:"tron"`                      // 网络 如：ton、tron；可与 token 同时缺省创建占位订单
 	Amount      float64 `json:"amount" form:"amount" validate:"required|isFloat|gt:0.01" example:"100.00"`
 	NotifyUrl   string  `json:"notify_url" form:"notify_url" validate:"required" example:"https://example.com/notify"`
 	Signature   string  `json:"signature" form:"signature" validate:"required" example:"a1b2c3d4e5f6..."`
 	RedirectUrl string  `json:"redirect_url" form:"redirect_url" example:"https://example.com/success"`
 	Name        string  `json:"name" form:"name" example:"VIP月卡"`
-	PaymentType string  `json:"payment_type" form:"payment_type" example:"Epay"`
+	// PaymentType is a compatibility flag, not a gateway selector. Only
+	// "Epay" (case-insensitive) switches callback format to legacy EPay;
+	// empty or any other value is stored as "Gmpay" and uses GMPay JSON.
+	// It is optional for GMPay, but must be included in the signature when sent.
+	PaymentType string `json:"payment_type" form:"payment_type" example:"Epay"`
 }
 
 func (r CreateTransactionRequest) Translates() map[string]string {

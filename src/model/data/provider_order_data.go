@@ -4,6 +4,7 @@ import (
 	"github.com/GMWalletApp/epusdt/model/dao"
 	"github.com/GMWalletApp/epusdt/model/mdb"
 	"gorm.io/gorm"
+	"gorm.io/gorm/clause"
 )
 
 func GetProviderOrderByTradeIDAndProvider(tradeID string, provider string) (*mdb.ProviderOrder, error) {
@@ -20,8 +21,27 @@ func CreateProviderOrderWithTransaction(tx *gorm.DB, row *mdb.ProviderOrder) err
 	return tx.Model(row).Create(row).Error
 }
 
+func UpsertProviderOrderCreatingWithTransaction(tx *gorm.DB, row *mdb.ProviderOrder) error {
+	return tx.Clauses(clause.OnConflict{
+		Columns: []clause.Column{{Name: "trade_id"}, {Name: "provider"}},
+		DoUpdates: clause.AssignmentColumns([]string{
+			"provider_order_id",
+			"pay_url",
+			"amount",
+			"coin",
+			"status",
+			"notify_raw",
+			"updated_at",
+		}),
+	}).Create(row).Error
+}
+
 func UpdateProviderOrderCreated(tradeID string, provider string, providerOrderID string, payURL string) error {
-	return dao.Mdb.Model(&mdb.ProviderOrder{}).
+	return UpdateProviderOrderCreatedWithTransaction(dao.Mdb, tradeID, provider, providerOrderID, payURL)
+}
+
+func UpdateProviderOrderCreatedWithTransaction(tx *gorm.DB, tradeID string, provider string, providerOrderID string, payURL string) error {
+	return tx.Model(&mdb.ProviderOrder{}).
 		Where("trade_id = ?", tradeID).
 		Where("provider = ?", provider).
 		Updates(map[string]interface{}{

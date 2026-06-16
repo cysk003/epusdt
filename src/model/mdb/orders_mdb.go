@@ -1,15 +1,24 @@
 package mdb
 
 const (
-	StatusWaitPay     = 1
-	StatusPaySuccess  = 2
-	StatusExpired     = 3
+	StatusWaitPay    = 1
+	StatusPaySuccess = 2
+	StatusExpired    = 3
+	// StatusWaitSelect is a placeholder order waiting for the payer to choose
+	// token+network or a hosted provider such as OkPay. It is not payable until
+	// switch-network moves it to StatusWaitPay.
+	StatusWaitSelect  = 4
 	CallBackConfirmOk = 1
 	CallBackConfirmNo = 2
 )
 
 const (
+	// PaymentTypeEpay is the normalized special payment_type value. Orders
+	// matching it case-insensitively use the legacy EPay callback shape.
 	PaymentTypeEpay = "Epay"
+	// PaymentTypeGmpay is the normalized default for GMPay-created orders.
+	// It uses the default GMPay JSON callback shape.
+	PaymentTypeGmpay = "Gmpay"
 )
 
 const (
@@ -19,9 +28,10 @@ const (
 	// PaymentProviderOkPay means this concrete order record is settled through
 	// the third-party OkayPay/OkPay hosted checkout flow.
 	//
-	// In the current design this is typically used by a switch-network-created
-	// child order, while the parent order keeps its original merchant-facing
-	// semantics and callback behavior.
+	// It can be used by a status=4 parent completed in place on first
+	// switch-network, or by a switch-network-created child order after the
+	// parent is already concrete. Merchant callback shape is still controlled by
+	// PaymentType, not by this provider value.
 	PaymentProviderOkPay = "okpay"
 )
 
@@ -36,21 +46,23 @@ type Orders struct {
 	ReceiveAddress     string  `gorm:"column:receive_address" json:"receive_address" example:"TTestTronAddress001"`
 	Token              string  `gorm:"column:token" json:"token" example:"USDT"`
 	Network            string  `gorm:"column:network" json:"network" example:"tron"`
-	// 订单状态 1=等待支付 2=支付成功 3=已过期
-	Status      int    `gorm:"column:status;default:1" json:"status" enums:"1,2,3" example:"1"`
+	// 订单状态 1=等待支付 2=支付成功 3=已过期 4=等待选择支付网络/币种
+	Status      int    `gorm:"column:status;default:1" json:"status" enums:"1,2,3,4" example:"1"`
 	NotifyUrl   string `gorm:"column:notify_url" json:"notify_url" example:"https://example.com/notify"`
 	RedirectUrl string `gorm:"column:redirect_url" json:"redirect_url" example:"https://example.com/success"`
 	Name        string `gorm:"column:name" json:"name" example:"VIP月卡"`
 	CallbackNum int    `gorm:"column:callback_num;default:0" json:"callback_num" example:"0"`
 	// 回调确认状态 1=回调成功 2=未回调/回调失败
-	CallBackConfirm int    `gorm:"column:callback_confirm;default:2" json:"callback_confirm" enums:"1,2" example:"2"`
-	IsSelected      bool   `gorm:"column:is_selected;default:false" json:"is_selected" example:"false"`
-	PaymentType     string `gorm:"column:payment_type" json:"payment_type" example:"Epay"`
+	CallBackConfirm int  `gorm:"column:callback_confirm;default:2" json:"callback_confirm" enums:"1,2" example:"2"`
+	IsSelected      bool `gorm:"column:is_selected;default:false" json:"is_selected" example:"false"`
+	// PaymentType is not a channel selector. "Epay" changes callback format
+	// to legacy EPay case-insensitively; "Gmpay" uses GMPay JSON.
+	PaymentType string `gorm:"column:payment_type" json:"payment_type" example:"Epay"`
 	// PayProvider identifies how this specific order row is collected.
 	//
 	// Semantics:
-	//   - parent orders and regular chain child orders use on_chain
-	//   - third-party hosted checkout child orders use their provider name
+	//   - chain parent orders and regular chain child orders use on_chain
+	//   - third-party hosted checkout rows use their provider name
 	//     (for example okpay)
 	//
 	// Existing rows default to on_chain for backward compatibility so upgrades
