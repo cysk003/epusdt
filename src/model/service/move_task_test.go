@@ -130,6 +130,45 @@ func TestParseAptosTransfersUSDTAndUSDCFungibleEvents(t *testing.T) {
 	}
 }
 
+func TestParseAptosTransfersConfiguredCustomFungibleEvent(t *testing.T) {
+	receive, _ := addressutil.NormalizeMoveAddress("0xa")
+	custom := "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	store, _ := addressutil.NormalizeMoveAddress("0x21")
+	senderStore, _ := addressutil.NormalizeMoveAddress("0x22")
+	body := []byte(`[
+		{
+			"type":"user_transaction",
+			"success":true,
+			"hash":"custom",
+			"version":"201",
+			"timestamp":"1700000000123456",
+			"events":[
+				{"type":"0x1::fungible_asset::Withdraw","data":{"amount":"7500000","store":"` + senderStore + `"}},
+				{"type":"0x1::fungible_asset::Deposit","data":{"amount":"7500000","store":"` + store + `"}}
+			],
+			"changes":[
+				{"address":"` + senderStore + `","data":{"type":"0x1::fungible_asset::FungibleStore","data":{"metadata":{"inner":"` + custom + `"}}},"type":"write_resource"},
+				{"address":"` + store + `","data":{"type":"0x1::fungible_asset::FungibleStore","data":{"metadata":{"inner":"` + custom + `"}}},"type":"write_resource"},
+				{"address":"` + store + `","data":{"type":"0x1::object::ObjectCore","data":{"owner":"` + receive + `"}},"type":"write_resource"}
+			]
+		}
+	]`)
+	tokens := []mdb.ChainToken{
+		{Network: mdb.NetworkAptos, Symbol: "MOVEUSD", ContractAddress: custom, Decimals: 6, Enabled: true},
+	}
+
+	got, err := ParseAptosTransfers(body, receive, tokens)
+	if err != nil {
+		t.Fatalf("ParseAptosTransfers: %v", err)
+	}
+	if len(got) != 1 {
+		t.Fatalf("transfers len = %d, want 1: %#v", len(got), got)
+	}
+	if got[0].Token != "MOVEUSD" || got[0].Amount != 7.5 || got[0].TxID != "0xcustom" {
+		t.Fatalf("custom transfer = %#v", got[0])
+	}
+}
+
 func TestParseAptosTransfersSplitDepositsMatchSingleWithdraw(t *testing.T) {
 	receive, _ := addressutil.NormalizeMoveAddress("0xa")
 	receive2, _ := addressutil.NormalizeMoveAddress("0xb")

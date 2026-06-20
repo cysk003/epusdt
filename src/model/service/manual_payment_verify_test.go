@@ -155,7 +155,7 @@ func TestValidateManualAptosPayment(t *testing.T) {
 		}
 	}))
 	defer server.Close()
-	overrideAptosFullnodeURLForTest(t, server.URL)
+	seedTestAptosRPCNode(t, server.URL, mdb.RpcNodePurposeGeneral, mdb.RpcNodeStatusOk, 100)
 
 	order := &mdb.Orders{
 		BaseModel:      mdb.BaseModel{ID: 1, CreatedAt: *carbon.NewTime(carbon.CreateFromTimestampMilli(1699999999000))},

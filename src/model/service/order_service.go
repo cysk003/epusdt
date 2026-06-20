@@ -72,15 +72,7 @@ func ensureEnabledOrderAsset(network, token string) (*mdb.ChainToken, error) {
 	if tokenRow == nil || tokenRow.ID == 0 {
 		return nil, constant.SupportedAssetNotFound
 	}
-	if tokenRow.Network == mdb.NetworkAptos {
-		switch NormalizeAptosPaymentSymbol(tokenRow.Symbol) {
-		case "USDT", "USDC":
-		default:
-			return nil, constant.SupportedAssetNotFound
-		}
-	}
-	contractAddress := strings.TrimSpace(tokenRow.ContractAddress)
-	if tokenRow.Network == mdb.NetworkAptos && contractAddress == "" {
+	if !ChainTokenReadyForPayment(*tokenRow) {
 		return nil, constant.SupportedAssetNotFound
 	}
 	return tokenRow, nil

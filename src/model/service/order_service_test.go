@@ -496,6 +496,29 @@ func TestCreateTransactionRejectsEnabledMisconfiguredAptosUSDT(t *testing.T) {
 	}
 }
 
+func TestEnsureEnabledOrderAssetAllowsConfiguredAptosCustomToken(t *testing.T) {
+	cleanup := testutil.SetupTestDatabases(t)
+	defer cleanup()
+
+	if err := dao.Mdb.Create(&mdb.ChainToken{
+		Network:         mdb.NetworkAptos,
+		Symbol:          "MOVEUSD",
+		ContractAddress: "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+		Decimals:        6,
+		Enabled:         true,
+	}).Error; err != nil {
+		t.Fatalf("create aptos custom token: %v", err)
+	}
+
+	token, err := ensureEnabledOrderAsset(mdb.NetworkAptos, "MOVEUSD")
+	if err != nil {
+		t.Fatalf("ensureEnabledOrderAsset(): %v", err)
+	}
+	if token.Symbol != "MOVEUSD" {
+		t.Fatalf("token symbol = %q, want MOVEUSD", token.Symbol)
+	}
+}
+
 func TestCreateTransactionSupportedTonTokenWithoutRateReturnsRateError(t *testing.T) {
 	cleanup := testutil.SetupTestDatabases(t)
 	defer cleanup()

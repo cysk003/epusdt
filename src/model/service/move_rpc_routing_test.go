@@ -4,7 +4,6 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
-	"sync"
 	"testing"
 
 	"github.com/GMWalletApp/epusdt/internal/testutil"
@@ -15,26 +14,60 @@ import (
 	"github.com/dromara/carbon/v2"
 )
 
-func overrideAptosFullnodeURLForTest(t *testing.T, url string) {
+func seedTestAptosRPCNode(t *testing.T, url, purpose, status string, weight int) mdb.RpcNode {
 	t.Helper()
-	oldURL := aptosFullnodeURL
-	aptosFullnodeURL = url
-	aptosFixedNodeLogOnce = sync.Once{}
-	t.Cleanup(func() {
-		aptosFullnodeURL = oldURL
-		aptosFixedNodeLogOnce = sync.Once{}
-	})
+	node := mdb.RpcNode{
+		Network: mdb.NetworkAptos,
+		Url:     url,
+		Type:    mdb.RpcNodeTypeHttp,
+		Weight:  weight,
+		Enabled: true,
+		Purpose: purpose,
+		Status:  status,
+	}
+	if node.Purpose == "" {
+		node.Purpose = mdb.RpcNodePurposeGeneral
+	}
+	if node.Status == "" {
+		node.Status = mdb.RpcNodeStatusOk
+	}
+	if err := dao.Mdb.Create(&node).Error; err != nil {
+		t.Fatalf("seed aptos rpc_nodes: %v", err)
+	}
+	return node
 }
 
-func TestAptosGetLedgerVersionUsesFixedPublicNode(t *testing.T) {
+func TestAptosGetLedgerVersionUsesRpcNodes(t *testing.T) {
 	cleanup := testutil.SetupTestDatabases(t)
 	defer cleanup()
 	data.ResetRpcFailoverForTest()
 	t.Cleanup(data.ResetRpcFailoverForTest)
 
-	var fixedCalls int
-	fixed := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		fixedCalls++
+	var disabledCalls int
+	disabled := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		disabledCalls++
+		_, _ = w.Write([]byte(`{"ledger_version":"999"}`))
+	}))
+	defer disabled.Close()
+	disabledNode := mdb.RpcNode{
+		Network: mdb.NetworkAptos,
+		Url:     disabled.URL,
+		Type:    mdb.RpcNodeTypeHttp,
+		Weight:  1000,
+		Enabled: false,
+		Purpose: mdb.RpcNodePurposeGeneral,
+		Status:  mdb.RpcNodeStatusOk,
+	}
+	if err := dao.Mdb.Create(&disabledNode).Error; err != nil {
+		t.Fatalf("seed disabled aptos rpc_nodes: %v", err)
+	}
+	if err := dao.Mdb.Model(&mdb.RpcNode{}).Where("id = ?", disabledNode.ID).Update("enabled", false).Error; err != nil {
+		t.Fatalf("disable aptos rpc_nodes: %v", err)
+	}
+
+	var calls int
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls++
 		if r.URL.Path != "/v1" {
 			http.NotFound(w, r)
 			return
@@ -42,15 +75,8 @@ func TestAptosGetLedgerVersionUsesFixedPublicNode(t *testing.T) {
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = w.Write([]byte(`{"ledger_version":"123"}`))
 	}))
-	defer fixed.Close()
-	overrideAptosFullnodeURLForTest(t, fixed.URL)
-
-	rows := []mdb.RpcNode{
-		{Network: mdb.NetworkAptos, Url: "https://old-aptos-rpc.example.com", Type: mdb.RpcNodeTypeHttp, Weight: 100, Enabled: true, Purpose: mdb.RpcNodePurposeBoth, Status: mdb.RpcNodeStatusOk},
-	}
-	if err := dao.Mdb.Create(&rows).Error; err != nil {
-		t.Fatalf("seed aptos rpc_nodes: %v", err)
-	}
+	defer server.Close()
+	seedTestAptosRPCNode(t, server.URL, mdb.RpcNodePurposeGeneral, mdb.RpcNodeStatusOk, 100)
 
 	got, err := AptosGetLedgerVersion()
 	if err != nil {
@@ -59,12 +85,53 @@ func TestAptosGetLedgerVersionUsesFixedPublicNode(t *testing.T) {
 	if got != 123 {
 		t.Fatalf("ledger version = %d, want 123", got)
 	}
-	if fixedCalls != 1 {
-		t.Fatalf("fixed node calls = %d, want 1", fixedCalls)
+	if calls != 1 {
+		t.Fatalf("rpc calls = %d, want 1", calls)
+	}
+	if disabledCalls != 0 {
+		t.Fatalf("disabled rpc calls = %d, want 0", disabledCalls)
 	}
 }
 
-func TestValidateManualAptosPaymentUsesFixedPublicNode(t *testing.T) {
+func TestAptosGetTransactionsFallsBackToAlternateRpcNode(t *testing.T) {
+	cleanup := testutil.SetupTestDatabases(t)
+	defer cleanup()
+	data.ResetRpcFailoverForTest()
+	t.Cleanup(data.ResetRpcFailoverForTest)
+
+	var primaryCalls int
+	primary := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		primaryCalls++
+		http.Error(w, "temporary failure", http.StatusBadGateway)
+	}))
+	defer primary.Close()
+	var backupCalls int
+	backup := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		backupCalls++
+		if r.URL.Path != "/v1/transactions" || r.URL.Query().Get("start") != "10" || r.URL.Query().Get("limit") != "2" {
+			http.NotFound(w, r)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`[]`))
+	}))
+	defer backup.Close()
+	seedTestAptosRPCNode(t, primary.URL, mdb.RpcNodePurposeGeneral, mdb.RpcNodeStatusOk, 100)
+	seedTestAptosRPCNode(t, backup.URL, mdb.RpcNodePurposeGeneral, mdb.RpcNodeStatusOk, 1)
+
+	body, err := AptosGetTransactions(10, 2)
+	if err != nil {
+		t.Fatalf("AptosGetTransactions(): %v", err)
+	}
+	if string(body) != "[]" {
+		t.Fatalf("transactions body = %s, want []", string(body))
+	}
+	if primaryCalls != 1 || backupCalls != 1 {
+		t.Fatalf("rpc calls primary=%d backup=%d, want 1/1", primaryCalls, backupCalls)
+	}
+}
+
+func TestValidateManualAptosPaymentUsesManualRpcFallback(t *testing.T) {
 	cleanup := testutil.SetupTestDatabases(t)
 	defer cleanup()
 
@@ -93,9 +160,15 @@ func TestValidateManualAptosPaymentUsesFixedPublicNode(t *testing.T) {
 		t.Fatalf("normalize aptos sender store: %v", err)
 	}
 
-	var fixedCalls int
-	fixed := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		fixedCalls++
+	var generalCalls int
+	general := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		generalCalls++
+		http.Error(w, "general unavailable", http.StatusBadGateway)
+	}))
+	defer general.Close()
+	var manualCalls int
+	manual := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		manualCalls++
 		w.Header().Set("Content-Type", "application/json")
 		switch {
 		case strings.HasPrefix(r.URL.Path, "/v1/transactions/by_hash/"):
@@ -106,16 +179,9 @@ func TestValidateManualAptosPaymentUsesFixedPublicNode(t *testing.T) {
 			http.NotFound(w, r)
 		}
 	}))
-	defer fixed.Close()
-	overrideAptosFullnodeURLForTest(t, fixed.URL)
-
-	rows := []mdb.RpcNode{
-		{Network: mdb.NetworkAptos, Url: "https://old-both.example.com", Type: mdb.RpcNodeTypeHttp, Weight: 100, Enabled: true, Purpose: mdb.RpcNodePurposeBoth, Status: mdb.RpcNodeStatusOk},
-		{Network: mdb.NetworkAptos, Url: "https://old-manual.example.com", Type: mdb.RpcNodeTypeHttp, Weight: 1, Enabled: true, Purpose: mdb.RpcNodePurposeManualVerify, Status: mdb.RpcNodeStatusOk},
-	}
-	if err := dao.Mdb.Create(&rows).Error; err != nil {
-		t.Fatalf("seed aptos rpc_nodes: %v", err)
-	}
+	defer manual.Close()
+	seedTestAptosRPCNode(t, general.URL, mdb.RpcNodePurposeGeneral, mdb.RpcNodeStatusOk, 100)
+	seedTestAptosRPCNode(t, manual.URL, mdb.RpcNodePurposeManualVerify, mdb.RpcNodeStatusOk, 1)
 
 	order := &mdb.Orders{
 		BaseModel:      mdb.BaseModel{ID: 1, CreatedAt: *carbon.NewTime(carbon.CreateFromTimestampMilli(1699999999000))},
@@ -131,7 +197,7 @@ func TestValidateManualAptosPaymentUsesFixedPublicNode(t *testing.T) {
 	if got != "0xabc" {
 		t.Fatalf("canonical tx id = %q, want %q", got, "0xabc")
 	}
-	if fixedCalls != 2 {
-		t.Fatalf("fixed node calls = %d, want 2", fixedCalls)
+	if generalCalls != 1 || manualCalls != 2 {
+		t.Fatalf("rpc calls general=%d manual=%d, want 1/2", generalCalls, manualCalls)
 	}
 }

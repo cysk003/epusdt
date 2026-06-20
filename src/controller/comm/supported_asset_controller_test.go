@@ -9,7 +9,7 @@ import (
 	"github.com/GMWalletApp/epusdt/model/mdb"
 )
 
-func TestBuildSupportedAssetsSkipsMisconfiguredAptosTokens(t *testing.T) {
+func TestBuildSupportedAssetsIncludesConfiguredAptosTokens(t *testing.T) {
 	cleanup := testutil.SetupTestDatabases(t)
 	defer cleanup()
 
@@ -21,6 +21,7 @@ func TestBuildSupportedAssetsSkipsMisconfiguredAptosTokens(t *testing.T) {
 	}
 	for _, row := range []mdb.ChainToken{
 		{Network: mdb.NetworkAptos, Symbol: "USDT", ContractAddress: "0x357b0b74bc833e95a115ad22604854d6b0fca151cecd94111770e5d6ffc9dc2b", Decimals: 6, Enabled: true},
+		{Network: mdb.NetworkAptos, Symbol: "MOVEUSD", ContractAddress: "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", Decimals: 6, Enabled: true},
 		{Network: mdb.NetworkAptos, Symbol: "USDC", ContractAddress: "", Decimals: 6, Enabled: true},
 	} {
 		if err := dao.Mdb.Create(&row).Error; err != nil {
@@ -38,7 +39,13 @@ func TestBuildSupportedAssetsSkipsMisconfiguredAptosTokens(t *testing.T) {
 	if supports[0].Network != mdb.NetworkAptos {
 		t.Fatalf("network = %q, want %q", supports[0].Network, mdb.NetworkAptos)
 	}
-	if len(supports[0].Tokens) != 1 || supports[0].Tokens[0] != "USDT" {
-		t.Fatalf("tokens = %#v, want [USDT]", supports[0].Tokens)
+	want := []string{"MOVEUSD", "USDT"}
+	if len(supports[0].Tokens) != len(want) {
+		t.Fatalf("tokens = %#v, want %#v", supports[0].Tokens, want)
+	}
+	for i := range want {
+		if supports[0].Tokens[i] != want[i] {
+			t.Fatalf("tokens = %#v, want %#v", supports[0].Tokens, want)
+		}
 	}
 }

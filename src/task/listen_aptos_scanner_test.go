@@ -81,6 +81,7 @@ func seedAptosScannerChain(t *testing.T, wallets ...string) []string {
 	if err := dao.Mdb.Create(&[]mdb.ChainToken{
 		{Network: mdb.NetworkAptos, Symbol: "USDC", ContractAddress: "0xbae207659db88bea0cbead6da0ed00aac12edcdda169e591cd41c94180b46f3b", Decimals: 6, Enabled: true},
 		{Network: mdb.NetworkAptos, Symbol: "USDT", ContractAddress: "0x357b0b74bc833e95a115ad22604854d6b0fca151cecd94111770e5d6ffc9dc2b", Decimals: 6, Enabled: true},
+		{Network: mdb.NetworkAptos, Symbol: "MOVEUSD", ContractAddress: "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", Decimals: 6, Enabled: true},
 	}).Error; err != nil {
 		t.Fatalf("seed Aptos tokens: %v", err)
 	}
@@ -99,6 +100,41 @@ func seedAptosScannerChain(t *testing.T, wallets ...string) []string {
 		out = append(out, receive)
 	}
 	return out
+}
+
+func TestProcessAptosLedgerRangePassesConfiguredTokens(t *testing.T) {
+	cleanup := testutil.SetupTestDatabases(t)
+	defer cleanup()
+	resetAptosScannerHooks(t)
+	seedAptosScannerChain(t, "0xa")
+
+	state, err := loadMoveWatchState(mdb.NetworkAptos)
+	if err != nil {
+		t.Fatalf("load state: %v", err)
+	}
+	var gotSymbols []string
+	parseAptosTransfersForWallets = func(_ []byte, _ map[string]struct{}, tokens []mdb.ChainToken) ([]service.MoveObservedTransfer, error) {
+		for _, token := range tokens {
+			gotSymbols = append(gotSymbols, token.Symbol)
+		}
+		sort.Strings(gotSymbols)
+		return nil, nil
+	}
+	provider := &fakeAptosProvider{bodiesByStart: map[int64][]byte{100: []byte("[]")}}
+
+	err = processAptosLedgerRange(context.Background(), provider, aptosLedgerRange{start: 100, limit: 1, state: state}, 100)
+	if err != nil {
+		t.Fatalf("processAptosLedgerRange(): %v", err)
+	}
+	want := []string{"MOVEUSD", "USDC", "USDT"}
+	if len(gotSymbols) != len(want) {
+		t.Fatalf("tokens = %#v, want %#v", gotSymbols, want)
+	}
+	for i := range want {
+		if gotSymbols[i] != want[i] {
+			t.Fatalf("tokens = %#v, want %#v", gotSymbols, want)
+		}
+	}
 }
 
 func TestRunAptosLedgerScannerIdlesWhenChainDisabled(t *testing.T) {
@@ -161,7 +197,6 @@ func TestProcessAptosLedgerRoundDoesNotAdvanceUnconfirmedVersion(t *testing.T) {
 	if err != nil {
 		t.Fatalf("load state: %v", err)
 	}
-	state.tokens = filterAptosPaymentTokens(state.tokens)
 
 	catchup, err := processAptosLedgerRound(context.Background(), provider, state, cursor, 99)
 	if err != nil {
@@ -188,7 +223,6 @@ func TestProcessAptosLedgerRoundAdvancesAfterSuccessfulRange(t *testing.T) {
 	if err != nil {
 		t.Fatalf("load state: %v", err)
 	}
-	state.tokens = filterAptosPaymentTokens(state.tokens)
 	provider := &fakeAptosProvider{bodiesByStart: map[int64][]byte{100: []byte("[]")}}
 	cursor := &aptosRuntimeCursor{initialized: true, lastSeenVersion: 99}
 
@@ -218,7 +252,6 @@ func TestProcessAptosLedgerRoundDoesNotAdvanceOnRangeFailure(t *testing.T) {
 	if err != nil {
 		t.Fatalf("load state: %v", err)
 	}
-	state.tokens = filterAptosPaymentTokens(state.tokens)
 	provider := &fakeAptosProvider{errByStart: map[int64]error{100: errors.New("temporary rpc failure")}}
 	cursor := &aptosRuntimeCursor{initialized: true, lastSeenVersion: 99}
 
@@ -240,7 +273,6 @@ func TestProcessAptosLedgerRoundProcessesMultipleChunks(t *testing.T) {
 	if err != nil {
 		t.Fatalf("load state: %v", err)
 	}
-	state.tokens = filterAptosPaymentTokens(state.tokens)
 	provider := &fakeAptosProvider{
 		bodiesByStart: map[int64][]byte{
 			100: []byte("[]"),
@@ -316,7 +348,6 @@ func TestProcessAptosLedgerRoundMarksMatchingUSDTOrderPaid(t *testing.T) {
 	if err != nil {
 		t.Fatalf("load state: %v", err)
 	}
-	state.tokens = filterAptosPaymentTokens(state.tokens)
 	provider := &fakeAptosProvider{bodiesByStart: map[int64][]byte{101: body}}
 	cursor := &aptosRuntimeCursor{initialized: true, lastSeenVersion: 100}
 
@@ -351,7 +382,6 @@ func TestProcessAptosLedgerRoundDoesNotReprocessDuplicateTransferKey(t *testing.
 	if err != nil {
 		t.Fatalf("load state: %v", err)
 	}
-	state.tokens = filterAptosPaymentTokens(state.tokens)
 	provider := &fakeAptosProvider{
 		bodiesByStart: map[int64][]byte{
 			101: aptosFungibleTransferBody(t, "0xabc", 101, receive, usdc, "1200000"),

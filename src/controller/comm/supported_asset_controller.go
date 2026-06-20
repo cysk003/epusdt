@@ -10,6 +10,7 @@ import (
 	"github.com/GMWalletApp/epusdt/model/data"
 	"github.com/GMWalletApp/epusdt/model/mdb"
 	"github.com/GMWalletApp/epusdt/model/response"
+	"github.com/GMWalletApp/epusdt/model/service"
 	"github.com/GMWalletApp/epusdt/util/constant"
 	"github.com/labstack/echo/v4"
 )
@@ -44,11 +45,7 @@ func buildSupportedAssets() ([]response.NetworkTokenSupport, error) {
 		}
 		symbols := make([]string, 0, len(tokens))
 		for _, t := range tokens {
-			contractAddress := strings.TrimSpace(t.ContractAddress)
-			if network == mdb.NetworkAptos && !aptosPublicPaymentToken(t.Symbol) {
-				continue
-			}
-			if network == mdb.NetworkAptos && contractAddress == "" {
+			if !service.ChainTokenReadyForPayment(t) {
 				continue
 			}
 			sym := strings.ToUpper(strings.TrimSpace(t.Symbol))
@@ -73,15 +70,6 @@ func buildSupportedAssets() ([]response.NetworkTokenSupport, error) {
 	}
 
 	return supports, nil
-}
-
-func aptosPublicPaymentToken(symbol string) bool {
-	switch strings.ToUpper(strings.TrimSpace(symbol)) {
-	case "USDT", "USDC":
-		return true
-	default:
-		return false
-	}
 }
 
 // GetPublicConfig returns payment/site config consumed by cashier/frontends.

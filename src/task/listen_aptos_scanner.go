@@ -52,8 +52,7 @@ var (
 func StartAptosLedgerScannerListener() {
 	provider := serviceAptosProvider{}
 	cursor := &aptosRuntimeCursor{}
-	log.Sugar.Infof("[APTOS] ledger scanner starting mode=full_ledger rpc=%s chunk_size=%d workers=%d queue_limit=%d",
-		service.AptosFixedFullnodeURL(),
+	log.Sugar.Infof("[APTOS] ledger scanner starting mode=full_ledger chunk_size=%d workers=%d queue_limit=%d",
 		aptosLedgerChunkSize,
 		aptosLedgerWorkerCount,
 		aptosLedgerQueueLimit,
@@ -85,9 +84,8 @@ func runAptosLedgerScanner(ctx context.Context, provider aptosChainProvider, cur
 		if err != nil {
 			return err
 		}
-		state.tokens = filterAptosPaymentTokens(state.tokens)
 		if len(state.wallets) == 0 || len(state.tokens) == 0 {
-			log.Sugar.Debug("[APTOS] no enabled wallets or USDT/USDC tokens, idling")
+			log.Sugar.Debug("[APTOS] no enabled wallets or tokens, idling")
 			if !sleepOrDone(ctx, interval) {
 				return nil
 			}
@@ -247,17 +245,6 @@ func processAptosLedgerRange(ctx context.Context, provider aptosChainProvider, i
 		)
 	}
 	return nil
-}
-
-func filterAptosPaymentTokens(tokens []mdb.ChainToken) []mdb.ChainToken {
-	out := make([]mdb.ChainToken, 0, len(tokens))
-	for _, token := range tokens {
-		switch service.NormalizeAptosPaymentSymbol(token.Symbol) {
-		case "USDT", "USDC":
-			out = append(out, token)
-		}
-	}
-	return out
 }
 
 func chooseAptosIdleDelay(catchup bool, interval time.Duration) time.Duration {

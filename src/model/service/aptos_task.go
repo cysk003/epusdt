@@ -7,7 +7,6 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
-	"sync"
 
 	"github.com/GMWalletApp/epusdt/model/data"
 	"github.com/GMWalletApp/epusdt/model/mdb"
@@ -15,15 +14,6 @@ import (
 	"github.com/GMWalletApp/epusdt/util/log"
 	"github.com/tidwall/gjson"
 )
-
-const defaultAptosFullnodeURL = "https://aptos-rest.publicnode.com/"
-
-var aptosFullnodeURL = defaultAptosFullnodeURL
-var aptosFixedNodeLogOnce sync.Once
-
-func AptosFixedFullnodeURL() string {
-	return strings.TrimSpace(aptosFullnodeURL)
-}
 
 func AptosGetLedgerVersion() (int64, error) {
 	body, err := aptosGet("/v1")
@@ -37,7 +27,7 @@ func AptosGetLedgerVersion() (int64, error) {
 
 func AptosGetTransactionByHash(txID string) ([]byte, error) {
 	txID = normalizeAptosTxID(txID)
-	log.Sugar.Infof("[APTOS] fetch transaction by hash tx=%s rpc=%s", txID, aptosFullnodeURL)
+	log.Sugar.Infof("[APTOS] fetch transaction by hash tx=%s", txID)
 	return aptosGet(fmt.Sprintf("/v1/transactions/by_hash/%s", txID))
 }
 
@@ -48,7 +38,7 @@ func AptosGetTransactions(start int64, limit int64) ([]byte, error) {
 	if limit <= 0 {
 		limit = 1
 	}
-	log.Sugar.Debugf("[APTOS] fetch transactions start=%d limit=%d rpc=%s", start, limit, aptosFullnodeURL)
+	log.Sugar.Debugf("[APTOS] fetch transactions start=%d limit=%d", start, limit)
 	return aptosGet(fmt.Sprintf("/v1/transactions?start=%d&limit=%d", start, limit))
 }
 
@@ -236,16 +226,7 @@ func aptosTransferMatchKey(symbol string, rawAmount *big.Int) string {
 }
 
 func resolveAptosPaymentToken(assetID string, tokens []mdb.ChainToken) *mdb.ChainToken {
-	token := resolveMoveToken(mdb.NetworkAptos, assetID, tokens)
-	if token == nil {
-		return nil
-	}
-	switch NormalizeAptosPaymentSymbol(token.Symbol) {
-	case "USDT", "USDC":
-		return token
-	default:
-		return nil
-	}
+	return resolveMoveToken(mdb.NetworkAptos, assetID, tokens)
 }
 
 func NormalizeAptosPaymentSymbol(symbol string) string {
@@ -336,17 +317,50 @@ func normalizeAptosTxID(txID string) string {
 
 func ValidateManualAptosPayment(order *mdb.Orders, txID string) (string, error) {
 	txID = normalizeAptosTxID(txID)
-	body, err := AptosGetTransactionByHash(txID)
+	nodes, err := data.ListManualPaymentRpcCandidates(mdb.NetworkAptos, mdb.RpcNodeTypeHttp)
+	if err != nil {
+		return "", err
+	}
+	if len(nodes) == 0 {
+		return "", fmt.Errorf("no enabled %s %s RPC node configured in rpc_nodes", mdb.NetworkAptos, mdb.RpcNodeTypeHttp)
+	}
+
+	var verifyErrors []string
+	for _, node := range nodes {
+		if strings.TrimSpace(node.Url) == "" {
+			continue
+		}
+		if _, err = validateManualAptosPaymentWithNode(order, txID, node); err != nil {
+			verifyErrors = append(verifyErrors, fmt.Sprintf("%s: %v", data.RpcNodeLogLabel(node), err))
+			continue
+		}
+		return txID, nil
+	}
+	if len(verifyErrors) > 0 {
+		return "", fmt.Errorf("manual Aptos verification failed: %s", strings.Join(verifyErrors, "; "))
+	}
+	return "", fmt.Errorf("no enabled %s %s RPC node configured in rpc_nodes", mdb.NetworkAptos, mdb.RpcNodeTypeHttp)
+}
+
+func validateManualAptosPaymentWithNode(order *mdb.Orders, txID string, node mdb.RpcNode) (string, error) {
+	txID = normalizeAptosTxID(txID)
+	body, err := aptosGetWithNode(node, fmt.Sprintf("/v1/transactions/by_hash/%s", txID))
 	if err != nil {
 		return "", fmt.Errorf("fetch aptos transaction: %w", err)
 	}
-	if err = validateManualAptosTransaction(order, txID, body); err != nil {
+	if err = validateManualAptosTransactionWithConfirm(order, txID, body, func(version int64) error {
+		return ensureAptosTransferConfirmedWithNode(version, node)
+	}); err != nil {
 		return "", err
 	}
 	return txID, nil
 }
 
 func validateManualAptosTransaction(order *mdb.Orders, txID string, body []byte) error {
+	return validateManualAptosTransactionWithConfirm(order, txID, body, EnsureAptosTransferConfirmed)
+}
+
+func validateManualAptosTransactionWithConfirm(order *mdb.Orders, txID string, body []byte, confirm func(int64) error) error {
 	tokens, err := data.ListEnabledChainTokensByNetwork(mdb.NetworkAptos)
 	if err != nil {
 		return err
@@ -360,7 +374,7 @@ func validateManualAptosTransaction(order *mdb.Orders, txID string, body []byte)
 		if !strings.EqualFold(transfer.TxID, txID) {
 			continue
 		}
-		if err = EnsureAptosTransferConfirmed(transfer.Version); err != nil {
+		if err = confirm(transfer.Version); err != nil {
 			return err
 		}
 		if err = EnsureMoveTransferMatchesOrder(order, transfer); err == nil {
@@ -381,8 +395,58 @@ func validateManualAptosTransaction(order *mdb.Orders, txID string, body []byte)
 func aptosGet(path string) (body []byte, err error) {
 	network := mdb.NetworkAptos
 	defer recordMoveRPCResult(network, &err)
-	logAptosFixedNode()
-	endpoint, err := aptosJoinURL(aptosFullnodeURL, path)
+
+	tried := make([]uint64, 0, 3)
+	var lastErr error
+	for attempts := 0; attempts < 3; attempts++ {
+		node, resolveErr := resolveAptosRpcNode(tried...)
+		if resolveErr != nil {
+			if lastErr != nil {
+				return nil, lastErr
+			}
+			return nil, resolveErr
+		}
+		if len(tried) > 0 {
+			log.Sugar.Warnf("[APTOS] trying alternate RPC node path=%s node=%s", path, data.RpcNodeLogLabel(*node))
+		}
+
+		body, err = aptosGetWithNode(*node, path)
+		if err == nil {
+			data.RecordRpcNodeSuccess(node.ID)
+			return body, nil
+		}
+
+		lastErr = err
+		failures, cooling := data.RecordRpcNodeFailure(node.ID)
+		nodeLabel := data.RpcNodeLogLabel(*node)
+		if cooling {
+			log.Sugar.Warnf("[APTOS] RPC node reached fail threshold path=%s node=%s failures=%d/%d", path, nodeLabel, failures, data.RpcFailoverThreshold)
+		} else {
+			log.Sugar.Warnf("[APTOS] RPC node failed path=%s node=%s failures=%d/%d", path, nodeLabel, failures, data.RpcFailoverThreshold)
+		}
+		tried = append(tried, node.ID)
+	}
+	return nil, lastErr
+}
+
+func resolveAptosRpcNode(excludeIDs ...uint64) (*mdb.RpcNode, error) {
+	node, err := data.SelectGeneralRpcNode(mdb.NetworkAptos, mdb.RpcNodeTypeHttp, excludeIDs...)
+	if err != nil {
+		return nil, err
+	}
+	if node == nil || node.ID == 0 {
+		return nil, fmt.Errorf("no enabled %s %s RPC node configured in rpc_nodes", mdb.NetworkAptos, mdb.RpcNodeTypeHttp)
+	}
+	rpcURL := strings.TrimSpace(node.Url)
+	if rpcURL == "" {
+		return nil, fmt.Errorf("rpc_nodes id=%d has empty url", node.ID)
+	}
+	node.Url = rpcURL
+	return node, nil
+}
+
+func aptosGetWithNode(node mdb.RpcNode, path string) (body []byte, err error) {
+	endpoint, err := aptosJoinURL(node.Url, path)
 	if err != nil {
 		return nil, err
 	}
@@ -423,12 +487,6 @@ func aptosJoinURL(base, path string) (string, error) {
 	return trimmedBase + path, nil
 }
 
-func logAptosFixedNode() {
-	aptosFixedNodeLogOnce.Do(func() {
-		log.Sugar.Infof("[APTOS] using fixed public fullnode url=%s", AptosFixedFullnodeURL())
-	})
-}
-
 func EnsureAptosTransferConfirmed(version int64) error {
 	if version <= 0 {
 		return fmt.Errorf("aptos transaction version missing")
@@ -437,6 +495,18 @@ func EnsureAptosTransferConfirmed(version int64) error {
 	if err != nil {
 		return fmt.Errorf("fetch aptos latest ledger version: %w", err)
 	}
+	return ensureAptosConfirmations(version, latest)
+}
+
+func ensureAptosTransferConfirmedWithNode(version int64, node mdb.RpcNode) error {
+	if version <= 0 {
+		return fmt.Errorf("aptos transaction version missing")
+	}
+	body, err := aptosGetWithNode(node, "/v1")
+	if err != nil {
+		return fmt.Errorf("fetch aptos latest ledger version: %w", err)
+	}
+	latest := gjson.GetBytes(body, "ledger_version").Int()
 	return ensureAptosConfirmations(version, latest)
 }
 
