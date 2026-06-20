@@ -10,6 +10,7 @@ import (
 	"github.com/GMWalletApp/epusdt/model/data"
 	"github.com/GMWalletApp/epusdt/model/mdb"
 	"github.com/GMWalletApp/epusdt/model/response"
+	"github.com/GMWalletApp/epusdt/model/service"
 	"github.com/GMWalletApp/epusdt/util/constant"
 	"github.com/labstack/echo/v4"
 )
@@ -44,6 +45,9 @@ func buildSupportedAssets() ([]response.NetworkTokenSupport, error) {
 		}
 		symbols := make([]string, 0, len(tokens))
 		for _, t := range tokens {
+			if !service.ChainTokenReadyForPayment(t) {
+				continue
+			}
 			sym := strings.ToUpper(strings.TrimSpace(t.Symbol))
 			if sym == "" {
 				continue
