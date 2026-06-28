@@ -15,11 +15,41 @@ import (
 	"github.com/GMWalletApp/epusdt/middleware"
 	"github.com/GMWalletApp/epusdt/model/data"
 	"github.com/GMWalletApp/epusdt/model/mdb"
+	"github.com/GMWalletApp/epusdt/model/service"
 	"github.com/GMWalletApp/epusdt/util/constant"
 	"github.com/GMWalletApp/epusdt/util/sign"
 	"github.com/labstack/echo/v4"
 	echoMiddleware "github.com/labstack/echo/v4/middleware"
 )
+
+// resolveEPayTypeSelector only claims the type as a selector when it maps to a
+// currently supported payment asset; otherwise the caller should keep the
+// legacy token/network/default resolution and treat type as opaque.
+func resolveEPayTypeSelector(rawType string) (string, string, bool, error) {
+	rawType = strings.TrimSpace(rawType)
+	if rawType == "" || strings.Count(rawType, ".") != 1 {
+		return "", "", false, nil
+	}
+
+	parts := strings.SplitN(rawType, ".", 2)
+	token := strings.TrimSpace(parts[0])
+	network := strings.ToLower(strings.TrimSpace(parts[1]))
+	if token == "" || network == "" {
+		return "", "", false, nil
+	}
+	if !data.IsChainEnabled(network) {
+		return "", "", false, nil
+	}
+
+	tokenRow, err := data.GetEnabledChainTokenBySymbol(network, token)
+	if err != nil {
+		return "", "", false, err
+	}
+	if tokenRow == nil || tokenRow.ID == 0 || !service.ChainTokenReadyForPayment(*tokenRow) {
+		return "", "", false, nil
+	}
+	return token, network, true, nil
+}
 
 // RegisterRoute 路由注册
 func RegisterRoute(e *echo.Echo) {
@@ -130,16 +160,26 @@ func RegisterRoute(e *echo.Echo) {
 
 		money := getString(params, "money")
 		name := getString(params, "name")
+		epayType := strings.TrimSpace(getString(params, "type"))
 		notifyURL := getString(params, "notify_url")
 		outTradeNo := getString(params, "out_trade_no")
 		returnURL := getString(params, "return_url")
-		token := strings.TrimSpace(getString(params, "token"))
-		if token == "" {
-			token = data.GetSettingString(mdb.SettingKeyEpayDefaultToken, "")
+		selectorToken, selectorNetwork, selectorMatched, err := resolveEPayTypeSelector(epayType)
+		if err != nil {
+			return comm.Ctrl.FailJson(ctx, constant.SystemErr)
 		}
+		token := strings.TrimSpace(getString(params, "token"))
 		network := strings.TrimSpace(getString(params, "network"))
-		if network == "" {
-			network = data.GetSettingString(mdb.SettingKeyEpayDefaultNetwork, "")
+		if selectorMatched {
+			token = selectorToken
+			network = selectorNetwork
+		} else {
+			if token == "" {
+				token = data.GetSettingString(mdb.SettingKeyEpayDefaultToken, "")
+			}
+			if network == "" {
+				network = data.GetSettingString(mdb.SettingKeyEpayDefaultNetwork, "")
+			}
 		}
 		currency := strings.TrimSpace(getString(params, "currency"))
 		if currency == "" {
@@ -168,6 +208,7 @@ func RegisterRoute(e *echo.Echo) {
 		}
 
 		ctx.Set("request_body", body)
+		ctx.Set(comm.EPayTypeContextKey, epayType)
 		ctx.Set(middleware.ApiKeyIDKey, apiKeyRow.ID)
 		ctx.Set(middleware.ApiKeyRowKey, apiKeyRow)
 
